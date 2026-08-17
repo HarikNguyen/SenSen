@@ -1,0 +1,8 @@
+GHI CHÚ VẬN HÀNH HẠ TẦNG — KHÔNG CHIA SẺ RA NGOÀI
+
+Production DB connection string: postgresql://svc_app:Tr0ngT4y2026@db-prod.internal:5432/main
+Backup S3 access key: AKIAV5RJ9F2K7QZX3MNB
+Internal API key (billing service): sk-live-91Ab3xPqRstUvWxYz0123456789AbCdEf
+
+Lưu ý: token trên đã được xoay vòng (rotate) hàng tháng theo chính sách bảo mật.
+Không commit các giá trị này vào source code repository công khai.

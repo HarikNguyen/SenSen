@@ -117,12 +117,23 @@ curl -X POST http://127.0.0.1:8000/api/v1/scan/file \
   -H "X-API-Key: <your_key>" -F "file=@contract.pdf" -F "confidence_threshold=0.5"
 ```
 
-Run tests / benchmark:
+Run tests / benchmark / corpus assessment:
 
 ```bash
 pytest tests/ -v
 python scripts/benchmark.py
+python scripts/assess_corpus.py            # scans sample_corpus/, writes ASSESSMENT_REPORT.md
+python scripts/assess_corpus.py /path/to/real/documents
 ```
+
+`assess_corpus.py` is the batch-audit counterpart to `/api/v1/scan`: point it
+at a folder, it scans every `.txt/.pdf/.docx` in it and ranks documents by a
+weighted risk score (live secrets > contract/financial/HR IDs > IP markers),
+so a human reviewer knows which document to open first instead of reading a
+flat entity dump. This is the "Assessment Report" deliverable from
+thongtin.md section 3 applied to a whole corpus rather than one file — see
+`ASSESSMENT_REPORT.md` for a real run against the 7 synthetic documents in
+`sample_corpus/` (all fake data, safe to commit).
 
 ## The 5 custom categories
 
@@ -259,6 +270,8 @@ app/
     recognizers.yaml  <- the whole extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
 tests/                17 detection tests (positive/negative/ambiguous) + 3 file-upload tests + auth
-scripts/benchmark.py  Vanilla Presidio vs. this registry, speed + coverage
-Dockerfile            Ready for Azure Container Apps / Render / any Docker host
+scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
+scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
+sample_corpus/         7 synthetic (fake-data) documents exercising all 5 categories + txt/pdf/docx
+Dockerfile             Ready for Azure Container Apps / Render / any Docker host
 ```
