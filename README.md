@@ -208,8 +208,12 @@ just before it).
 
 ## Deployment (Azure Container Apps)
 
-Not run yet — this repo has no `az` CLI session available to it. Commands to
-run yourself from the repo root once logged in (`az login`):
+The `Dockerfile` itself is verified, not theoretical: `docker build` (656MB
+image) → `docker run` → `/register` → `/api/v1/scan` all passed locally,
+correctly returning `CONTRACT_ID`/`EMAIL_ADDRESS` for a test document. What's
+untested is only the Azure side — this environment has no `az` CLI session
+available to it. Commands to run yourself from the repo root once logged in
+(`az login`):
 
 ```bash
 az group create -n sensen-rg -l southeastasia
