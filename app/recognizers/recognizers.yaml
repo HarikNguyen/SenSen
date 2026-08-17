@@ -1,0 +1,199 @@
+# SenSen custom recognizer registry.
+#
+# This file IS the extensibility mechanism required by thongtin.md section 2.D
+# ("Modular/Plugin-based Architecture"): Presidio loads this natively via
+# RecognizerRegistryProvider — adding a 6th/7th category later means adding
+# another YAML block here, no core code changes.
+# Schema verified against the installed presidio-analyzer package's own
+# presidio_analyzer/conf/{default_recognizers,example_recognizers}.yaml.
+
+supported_languages:
+  - en
+
+global_regex_flags: 26  # re.IGNORECASE (2) | re.MULTILINE (8) | re.DOTALL (16)
+
+recognizers:
+  # ---- NLP-based NER (PERSON/ORGANIZATION/DATE via spaCy) ----
+  - name: SpacyRecognizer
+    type: predefined
+    supported_languages:
+      - en
+
+  # ---- Standard PII kept from Presidio's built-ins (curated subset, not the full list) ----
+  - name: EmailRecognizer
+    type: predefined
+  - name: PhoneRecognizer
+    type: predefined
+  - name: UrlRecognizer
+    type: predefined
+  - name: IpRecognizer
+    type: predefined
+  - name: CreditCardRecognizer
+    type: predefined
+  - name: IbanRecognizer
+    type: predefined
+  - name: CryptoRecognizer
+    type: predefined
+  - name: MacAddressRecognizer
+    type: predefined
+  - name: UsSsnRecognizer
+    type: predefined
+
+  # ================================================================
+  # 5 CUSTOM ENTERPRISE CATEGORIES (thongtin.md section 2.A)
+  # ================================================================
+
+  # A. Legal & Contractual
+  - name: Contract ID Recognizer
+    supported_language: "en"
+    supported_entity: "CONTRACT_ID"
+    patterns:
+      - name: "contract id (strong, e.g. HD-2026-0142)"
+        regex: "\\b(?:HD|H\\u0110|NDA)[-\\/][0-9]{4}[-\\/][A-Z0-9]{2,8}\\b"
+        score: 0.75
+      - name: "contract id (generic code, weak)"
+        regex: "\\b[A-Z]{2,6}[-\\/]\\d{2,4}[-\\/][A-Z0-9]{2,10}\\b"
+        score: 0.3
+    # NOTE on Vietnamese context words throughout this file: Presidio's default
+    # LemmaContextAwareEnhancer matches context words against INDIVIDUAL
+    # surrounding token lemmas (see lemma_context_aware_enhancer.py) — a
+    # multi-word phrase like "hợp đồng" never equals a single token's lemma
+    # and will silently never match. So context words below are deliberately
+    # single syllables/tokens, curated to skip ultra-generic Vietnamese
+    # syllables (số, mã, đồng, bảo, thường...) that would over-boost unrelated
+    # matches. This is a best-effort heuristic under an English tokenizer/
+    # lemmatizer, not proper Vietnamese NLP — see README roadmap.
+    context:
+      - "lục"
+      - "luc"
+      - "thuận"
+      - "thuan"
+      - "mật"
+      - "mat"
+      - "bồi"
+      - "boi"
+      - "contract"
+      - "agreement"
+      - "nda"
+      - "clause"
+
+  # B. Financial & Accounting (split into tax code + financial figure)
+  - name: Vietnam Tax Code Recognizer
+    supported_language: "en"
+    supported_entity: "INTERNAL_TAX_CODE"
+    patterns:
+      # Excludes the common VN mobile prefixes (03/05/07/08/09) to cut collisions
+      # with phone numbers — thongtin.md section 2.B's "random digit string
+      # mistaken for sensitive data" false-positive problem, addressed directly.
+      - name: "MST 10-digit (mobile-prefix excluded)"
+        regex: "\\b0(?![35789])\\d{9}\\b|\\b[1-9]\\d{9}\\b"
+        score: 0.25
+      - name: "MST 13-digit (with branch suffix)"
+        regex: "\\b\\d{10}-\\d{3}\\b"
+        score: 0.4
+    context:
+      - "thuế"
+      - "thue"
+      - "mst"
+      - "tax"
+      - "code"
+      - "doanh"
+      - "nghiệp"
+      - "nghiep"
+
+  - name: Financial Metric Recognizer
+    supported_language: "en"
+    supported_entity: "FINANCIAL_METRIC"
+    patterns:
+      - name: "currency amount (VND/USD)"
+        regex: "\\b[\\d]{1,3}(?:[.,]\\d{3})+(?:\\s?(?:VND|VNĐ|đ|USD))?\\b|\\$\\s?[\\d]{1,3}(?:[.,]\\d{3})*"
+        score: 0.35
+    context:
+      - "lương"
+      - "luong"
+      - "nhuận"
+      - "nhuan"
+      - "phí"
+      - "phi"
+      - "ngân"
+      - "ngan"
+      - "phạt"
+      - "phat"
+      - "salary"
+      - "revenue"
+      - "budget"
+
+  # C. HR & Workforce
+  - name: Employee ID Recognizer
+    supported_language: "en"
+    supported_entity: "EMPLOYEE_ID"
+    patterns:
+      - name: "employee code NV-/EMP-/STAFF-"
+        regex: "\\b(?:NV|EMP|STAFF)[-\\s]?\\d{3,8}\\b"
+        score: 0.5
+    context:
+      - "nhân"
+      - "nhan"
+      - "chấm"
+      - "cham"
+      - "employee"
+      - "performance"
+      - "payroll"
+
+  # D. Security & Infrastructure — patterns adapted from gitleaks' public default ruleset
+  # (github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml), MIT-licensed reference.
+  - name: Infra Secret Recognizer
+    supported_language: "en"
+    supported_entity: "INFRA_SECRET"
+    patterns:
+      - name: "AWS access key id"
+        regex: "\\bAKIA[0-9A-Z]{16}\\b"
+        score: 0.9
+      - name: "generic sk-style secret key"
+        regex: "\\bsk-[A-Za-z0-9_-]{20,}\\b"
+        score: 0.75
+      - name: "JWT"
+        regex: "\\beyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\b"
+        score: 0.8
+      - name: "database connection string"
+        regex: "\\b(?:postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis):\\/\\/[^\\s'\"]{5,}\\b"
+        score: 0.85
+      - name: "assigned secret/token/password (weak, needs context)"
+        regex: "(?:api[_-]?key|secret|token|password|pwd)\\s*[:=]\\s*['\"]?[A-Za-z0-9\\-_.]{6,}['\"]?"
+        score: 0.4
+    context:
+      - "secret"
+      - "key"
+      - "token"
+      - "password"
+      - "credential"
+      - "connection"
+      - "string"
+      - "database"
+      - "api"
+
+  # E. Intellectual Property — deliberately low-confidence "flag for human review" signal.
+  # Regex cannot reliably detect trade secrets/proprietary source code; this recognizer
+  # only flags documents carrying explicit confidentiality markers near IP-related context.
+  - name: IP Confidentiality Marker Recognizer
+    supported_language: "en"
+    supported_entity: "IP_SENSITIVE_MARKER"
+    patterns:
+      - name: "confidentiality marker"
+        regex: "\\b(?:confidential|proprietary|trade secret|internal use only|bí mật kinh doanh|tài liệu mật|không phổ biến)\\b"
+        score: 0.35
+    context:
+      - "source"
+      - "code"
+      - "design"
+      - "doc"
+      - "patent"
+      - "quyền"
+      - "quyen"
+      - "hữu"
+      - "huu"
+      - "tuệ"
+      - "tue"
+      - "know-how"
+      - "quyết"
+      - "quyet"
