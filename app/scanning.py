@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from presidio_analyzer import AnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine
 
+from app.deep_scan import run_deep_scan
 from app.schemas import (
     AnonymizedContent,
     DetectedEntity,
@@ -33,6 +34,7 @@ def run_scan(
     analyzer: AnalyzerEngine,
     anonymizer: AnonymizerEngine,
     *,
+    deep_scan: bool = False,
     file_name: Optional[str] = None,
     file_type: str = "text",
     processing_mode: str = "direct_text_extraction",
@@ -70,6 +72,15 @@ def run_scan(
         for r in results
     ]
 
+    deep_scan_status = None
+    if deep_scan:
+        deep_entities, deep_scan_status = run_deep_scan(text)
+        entities.extend(deep_entities)
+        entities.sort(key=lambda e: e.location.start)
+        # Note: deep_entities are not passed through anonymizer.anonymize()
+        # below — that only understands Presidio's own RecognizerResult, not
+        # langextract output. anonymize=true masks regex-found spans only.
+
     anonymized_content = None
     if anonymize:
         anon_result = anonymizer.anonymize(text=text, analyzer_results=results)
@@ -85,4 +96,5 @@ def run_scan(
         ),
         detected_entities=entities,
         anonymized_content=anonymized_content,
+        deep_scan_status=deep_scan_status,
     )

@@ -6,6 +6,8 @@ import uuid
 import pymupdf
 from docx import Document
 
+from app.schemas import DetectedEntity, EntityLocation
+
 
 def entity_types(resp):
     return {e["entity_type"] for e in resp.json()["detected_entities"]}
@@ -222,6 +224,77 @@ def test_financial_credential_with_banking_context_outscores_bare(scan):
     assert ctx_scores, "banking-context password should be detected"
     assert bare_scores, "bare password assignment should still be detected (weakly)"
     assert max(ctx_scores) > max(bare_scores)
+
+
+# ------------------------------------------------------------- deep scan ----
+# app.scanning imports run_deep_scan via `from app.deep_scan import run_deep_scan`,
+# so patches must target app.scanning.run_deep_scan (the bound name in that
+# module's namespace), not app.deep_scan.run_deep_scan.
+
+
+def test_deep_scan_off_by_default_never_calls_langextract(client, api_key, monkeypatch):
+    def _boom(text):
+        raise AssertionError("run_deep_scan must not run when deep_scan is unset")
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _boom)
+    resp = client.post("/api/v1/scan", json={"text": "hello"}, headers={"X-API-Key": api_key})
+    assert resp.status_code == 200
+    assert resp.json()["deep_scan_status"] is None
+
+
+def test_deep_scan_merges_successful_extraction(client, api_key, monkeypatch):
+    def _fake(text):
+        entity = DetectedEntity(
+            entity_type="HR_SENSITIVE_CONTENT",
+            location=EntityLocation(start=0, end=5),
+            text_val=text[0:5],
+            score=0.6,
+            context_snippet=text[0:5],
+        )
+        return [entity], "ok"
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _fake)
+    resp = client.post(
+        "/api/v1/scan",
+        json={"text": "Nhân viên bị kỷ luật.", "deep_scan": True},
+        headers={"X-API-Key": api_key},
+    )
+    body = resp.json()
+    assert body["deep_scan_status"] == "ok"
+    assert "HR_SENSITIVE_CONTENT" in entity_types(resp)
+
+
+def test_deep_scan_failure_falls_back_to_regex_results(client, api_key, monkeypatch):
+    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text: ([], "skipped_error"))
+    resp = client.post(
+        "/api/v1/scan",
+        json={"text": "Contact test@example.com", "deep_scan": True},
+        headers={"X-API-Key": api_key},
+    )
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["deep_scan_status"] == "skipped_error"
+    assert "EMAIL_ADDRESS" in entity_types(resp)
+
+
+def test_deep_scan_quota_exceeded_after_cap(client, monkeypatch):
+    from app.pages import MAX_DEEP_SCAN_PER_KEY
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text: ([], "ok"))
+
+    email = f"quota-{uuid.uuid4().hex[:8]}@sensen.dev"
+    key = client.post("/register", json={"email": email}).json()["api_key"]
+
+    for _ in range(MAX_DEEP_SCAN_PER_KEY):
+        resp = client.post(
+            "/api/v1/scan", json={"text": "hello", "deep_scan": True}, headers={"X-API-Key": key}
+        )
+        assert resp.json()["deep_scan_status"] == "ok"
+
+    resp = client.post(
+        "/api/v1/scan", json={"text": "hello", "deep_scan": True}, headers={"X-API-Key": key}
+    )
+    assert resp.json()["deep_scan_status"] == "skipped_quota_exceeded"
 
 
 def test_tax_code_context_outscores_bare_digits(scan):

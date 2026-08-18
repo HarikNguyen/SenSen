@@ -19,6 +19,10 @@ class ScanRequest(BaseModel):
     language: str = Field(default="en", description="Language code, e.g. en, vi")
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     anonymize: bool = Field(default=False, description="Return a masked copy of the text")
+    deep_scan: bool = Field(
+        default=False,
+        description="Also run an LLM-based pass for semantic-only categories (costs a Gemini call)",
+    )
 
 
 class EntityLocation(BaseModel):
@@ -51,3 +55,10 @@ class ScanResponse(BaseModel):
     document_metadata: DocumentMetadata
     detected_entities: list[DetectedEntity]
     anonymized_content: Optional[AnonymizedContent] = None
+    deep_scan_status: Optional[str] = Field(
+        default=None,
+        description=(
+            "null if deep_scan wasn't requested; otherwise one of "
+            "'ok', 'skipped_no_key', 'skipped_quota_exceeded', 'skipped_error'"
+        ),
+    )

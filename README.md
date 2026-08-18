@@ -4,9 +4,11 @@ A Presidio-powered API that finds standard PII *and* ten enterprise-specific
 sensitive-data categories (Legal, Financial, HR, Security/Infra, IP, plus a
 round-2 batch: crypto keys, network maps, GPS, financial credentials) in
 text, PDF and DOCX documents, scores confidence with context-aware
-validation, and can return an anonymized copy.
+validation, and can return an anonymized copy. An opt-in "deep scan" pass
+(LLM-based, see below) adds 2 more categories that regex fundamentally can't
+detect — trade-secret content and sensitive HR content.
 
-Status: **working local MVP** — 24/24 automated tests passing, tested end to
+Status: **working local MVP** — 28/28 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -203,6 +205,59 @@ Restart the app. That's the entire integration surface — this is what
    test/sample text, since Vietnamese-under-English-pipeline context matching
    is already documented above as best-effort, not guaranteed.
 
+## Deep scan — LLM-based pass for semantic-only categories (opt-in)
+
+Some categories can't be regex-detected at all — "does this paragraph
+disclose a trade secret" has no fixed shape. Presidio ships a disabled-by-
+default `BasicLangExtractRecognizer` that wraps Google's
+[`langextract`](https://github.com/google/langextract) library (LLM-based,
+few-shot extraction with built-in source-grounding — it maps each extraction
+back to an exact character span, which is the hard part of turning LLM
+output into a `DetectedEntity`). It is **not** wired in as a normal Presidio
+recognizer, because Presidio runs every recognizer in the registry on every
+`/api/v1/scan` call, and Gemini's free tier (~15 RPM / ~1,000-1,500 RPD, no
+card required) would be exhausted almost immediately under real traffic.
+
+Instead, `app/deep_scan.py` is called only when the caller explicitly opts
+in:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/scan \
+  -H "Content-Type: application/json" -H "X-API-Key: <your_key>" \
+  -d '{"text": "...", "deep_scan": true}'
+```
+
+Requires the `LANGEXTRACT_API_KEY` env var (this exact name — it's what the
+library itself reads; get a key at
+[aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey), no
+card needed). Without it, `deep_scan: true` doesn't error — the response
+just carries `"deep_scan_status": "skipped_no_key"` and regex-only results,
+same as any other failure mode (network error, quota exhausted) collapses to
+`"skipped_error"`. `deep_scan` omitted or `false` never touches this code
+path at all — zero behavior change for existing clients.
+
+Pilot categories (`app/deep_scan.py`'s `EXAMPLES`, extend by adding more
+few-shot examples — no other code changes needed, same story as
+`recognizers.yaml`):
+
+| entity_type | What it catches |
+|---|---|
+| `IP_TRADE_SECRET_CONTENT` | Upgrades the regex-only `IP_SENSITIVE_MARKER` (which only matches the literal word "confidential") into real detection of trade-secret-shaped content — proprietary algorithms, formulas, unreleased specs |
+| `HR_SENSITIVE_CONTENT` | Performance-review / disciplinary content — no regex-detectable shape at all |
+
+Two things worth knowing:
+- **Scores are a fixed placeholder** (`0.6`) — langextract doesn't produce a
+  Presidio-style calibrated confidence, unlike every regex-based category.
+- **`anonymize=true` doesn't mask deep-scan hits** — the anonymizer only
+  understands Presidio's own `RecognizerResult`, not langextract output.
+  Deep-scan entities appear in `detected_entities` for visibility but aren't
+  included in `anonymized_content`.
+
+Per-key usage is capped (`MAX_DEEP_SCAN_PER_KEY = 50` in `app/pages.py`,
+lifetime not daily-rolling — the simplest guard against one client draining
+the shared free-tier quota; a real daily-reset quota is a reasonable
+follow-up once actual usage is observed).
+
 ## Known limitations (read before demoing)
 
 - **Vietnamese NER is weak.** `en_core_web_sm` is English-only; on Vietnamese
@@ -234,17 +289,19 @@ Restart the app. That's the entire integration surface — this is what
    Free F0 tier confirmed working but capped at 2 pages/doc — fine for a demo,
    needs paid S0 for real contracts. Needs your Azure key to build and test;
    not stubbed in this repo to avoid shipping untested cloud-integration code.
-2. **LLM second-opinion validator** (Gemini free tier via Google AI Studio,
-   no card required) for entities scoring in the ambiguous 0.4–0.7 band, to
-   push precision further. Verified free-tier access works, but Google cut
-   quotas 50-80% in Dec 2025 — call it selectively (borderline-confidence
-   hits only) with a skip-on-quota-exhaustion fallback, never as a hard
-   dependency.
-3. **Vietnamese NLP**: `vi_spacy` (spaCy-compatible, least glue code to plug
+2. **Vietnamese NLP**: `vi_spacy` (spaCy-compatible, least glue code to plug
    into Presidio's existing `NlpEngine` interface) or `underthesea`.
-4. **Render.com fallback deploy** if Azure setup friction blocks a demo
+3. **Render.com fallback deploy** if Azure setup friction blocks a demo
    deadline — free tier confirmed live (512MB RAM/0.1 CPU, 750 hrs/mo, ~15min
    inactivity sleep). Tighter on RAM than Container Apps but zero Azure setup.
+4. **LLM confidence validator** — a different use of the same `langextract`/
+   Gemini pipeline already built for deep scan: re-score *existing*
+   regex-based hits that land in the ambiguous 0.4–0.7 confidence band,
+   instead of discovering new entity types. Not built yet — the deep-scan
+   integration (see above) covers the new-category use case first.
+5. **Real daily-rolling deep-scan quota** — the current `MAX_DEEP_SCAN_PER_KEY`
+   cap in `app/pages.py` is a simple lifetime counter; a proper daily reset
+   is worth building once actual usage patterns are observed.
 
 ## Deployment (Azure Container Apps)
 
@@ -296,14 +353,15 @@ app/
   logics.py           Business logic the routes call (currently: registration)
   engine.py           Presidio construction (spaCy + recognizer registry)
   scanning.py         Core scan logic: analyze -> entities -> optional anonymize
+  deep_scan.py        Opt-in LLM pass (langextract + Gemini) for semantic-only categories
   auth.py             X-API-Key verification dependency
   database.py         SQLAlchemy models: User, APIKey
   schemas.py          Pydantic request/response contracts
   extract.py          PDF/DOCX/TXT -> plain text (no OCR)
   recognizers/
-    recognizers.yaml  <- the whole extensibility story lives here
+    recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                21 detection tests (positive/negative/ambiguous) + 3 file-upload tests + auth
+tests/                25 detection tests (positive/negative/ambiguous) + 3 file-upload tests + 4 deep-scan tests + auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
 sample_corpus/         8 synthetic (fake-data) documents exercising all 10 categories + txt/pdf/docx

@@ -34,6 +34,7 @@ class APIKey(Base):
     key = Column(String, unique=True, index=True, default=lambda: uuid.uuid4().hex)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     request_count = Column(Integer, default=0)
+    deep_scan_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="api_keys")
