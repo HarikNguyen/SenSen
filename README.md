@@ -1,11 +1,15 @@
 # SenSen — Sensitive Data Classifier
 
-A Presidio-powered API that finds standard PII *and* five enterprise-specific
-sensitive-data categories (Legal, Financial, HR, Security/Infra, IP) in text,
-PDF and DOCX documents, scores confidence with context-aware validation, and
-can return an anonymized copy. Built from the spec in `thongtin.md`.
+A Presidio-powered API that finds standard PII *and* ten enterprise-specific
+sensitive-data categories (Legal, Financial, HR, Security/Infra, IP, plus a
+round-2 batch: crypto keys, network maps, GPS, financial credentials) in
+text, PDF and DOCX documents, scores confidence with context-aware
+validation, and can return an anonymized copy. Built from the spec in
+`thongtin.md`, then extended using the taxonomy research in the project
+report (definition of "sensitive data" synthesized from 5 legal frameworks +
+3 market DLP products).
 
-Status: **working local MVP** — 20/20 automated tests passing, tested end to
+Status: **working local MVP** — 24/24 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -49,9 +53,9 @@ config-driven recognizer registry** (`RecognizerRegistryProvider` /
 `AnalyzerEngineProvider`) — confirmed against the installed package's own
 `presidio_analyzer/conf/{default_recognizers,example_recognizers}.yaml` and
 the [official docs](https://microsoft.github.io/presidio/analyzer/recognizer_registry_provider/).
-**All 5 custom categories live entirely in `app/recognizers/recognizers.yaml`
-— `app/main.py` never changes when you add a 6th.** See "Adding a new
-category" below.
+**All 10 custom categories live entirely in `app/recognizers/recognizers.yaml`
+— `app/main.py` never changed when the second batch of 4 was added, and won't
+change for the next one either.** See "Adding a new category" below.
 
 ### Why Azure Container Apps instead of the App Service the spec suggested
 
@@ -135,7 +139,7 @@ thongtin.md section 3 applied to a whole corpus rather than one file — see
 `ASSESSMENT_REPORT.md` for a real run against the 7 synthetic documents in
 `sample_corpus/` (all fake data, safe to commit).
 
-## The 5 custom categories
+## The 10 custom categories
 
 | Category (thongtin.md 2.A) | entity_type | Signal |
 |---|---|---|
@@ -145,6 +149,16 @@ thongtin.md section 3 applied to a whole corpus rather than one file — see
 | C. HR & Workforce | `EMPLOYEE_ID` | `NV-/EMP-/STAFF-#####` style codes |
 | D. Security & Infra | `INFRA_SECRET` | AWS keys, `sk-...` keys, JWTs, DB connection strings — patterns adapted from [gitleaks' public ruleset](https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml) |
 | E. Intellectual Property | `IP_SENSITIVE_MARKER` | Deliberately **low-confidence** — flags "CONFIDENTIAL/proprietary/trade secret" markers for human review. Regex fundamentally cannot detect trade secrets/source code reliably; this category is a review flag, not a detector. Stated here on purpose rather than overclaiming precision it can't have. |
+
+Round 2 (added from the taxonomy research below — chosen because they scored
+"khả thi ngay bằng regex", same risk profile as round 1):
+
+| Category | entity_type | Signal |
+|---|---|---|
+| F. Cryptographic material | `CRYPTO_PRIVATE_KEY` | PEM private-key block headers (`-----BEGIN RSA PRIVATE KEY-----` etc.) — near-zero false-positive rate |
+| G. Internal network map | `INFRA_NETWORK_MAP` | RFC1918 private IPv4 ranges + any CIDR notation (`10.20.5.1/24`) — distinct from Presidio's built-in `IpRecognizer`, which only matches single IPs |
+| H. GPS coordinates | `GPS_LOCATION` | Decimal lat/long pairs — deliberately weak base score (0.25), leans on context almost entirely, same design as `INTERNAL_TAX_CODE` |
+| I. Financial credential | `FINANCIAL_CREDENTIAL` | PIN/OTP/password *assignment* boosted by banking context — not the account number alone (same collision risk as phone-vs-tax-code, deliberately avoided) |
 
 ### Adding a new category (no code changes)
 
@@ -164,22 +178,31 @@ Add a block to `app/recognizers/recognizers.yaml`:
 Restart the app. That's the entire integration surface — this is what
 "modular/plugin-based, no core code changes" means concretely.
 
-**Gotcha to know about** (cost me a debug cycle building this): Presidio's
-context matcher compares your `context` words against **individual
-surrounding token lemmas** — a multi-word phrase like `"hợp đồng"` will
-*silently* never match anything, because no single token's lemma equals a
-two-word string. Use single words. See the comment block at the top of the
-`recognizers` list in `recognizers.yaml` for the full explanation and the fix
-applied throughout (`context_prefix_count`/`context_suffix_count` widened to
-5/5 in `app/main.py` so context words on either side of a match count, not
-just before it).
+**Gotchas to know about** (both cost a debug cycle building this):
+
+1. Presidio's context matcher compares your `context` words against
+   **individual surrounding token lemmas** — a multi-word phrase like
+   `"hợp đồng"` will *silently* never match anything, because no single
+   token's lemma equals a two-word string. Use single words. See the comment
+   block at the top of the `recognizers` list in `recognizers.yaml` for the
+   full explanation and the fix applied throughout
+   (`context_prefix_count`/`context_suffix_count` widened to 5/5 in
+   `app/main.py` so context words on either side of a match count, not just
+   before it).
+2. For any `"keyword ... value"` pattern (like `FINANCIAL_CREDENTIAL`'s
+   PIN/password assignment), a fixed-width gap between the keyword and the
+   value (e.g. `.{0,30}?`) will silently fail to match once real sentences
+   insert enough descriptive text — "mật khẩu ngân hàng của tài khoản công
+   ty là: X" alone is ~33 chars of filler, past a 30-char cap. Size the gap
+   generously (60 chars here) and add a test with a realistically wordy
+   sentence, not just the shortest phrasing that happens to work.
 
 ## Known limitations (read before demoing)
 
 - **Vietnamese NER is weak.** `en_core_web_sm` is English-only; on Vietnamese
   text it mislabels ordinary words as PERSON/ORGANIZATION/DATE_TIME (verified
   empirically — see the false positives in a raw scan of Vietnamese text).
-  The 5 custom categories are regex/context-based so they're mostly
+  The 10 custom categories are regex/context-based so they're mostly
   unaffected, but generic NER entities will be noisy on Vietnamese input.
   Fix requires a Vietnamese-aware model (`vi_spacy` or `underthesea`) — sized
   as a roadmap item, not day-1 scope, to protect the build timeline.
@@ -269,7 +292,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                17 detection tests (positive/negative/ambiguous) + 3 file-upload tests + auth
+tests/                21 detection tests (positive/negative/ambiguous) + 3 file-upload tests + auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
 sample_corpus/         7 synthetic (fake-data) documents exercising all 5 categories + txt/pdf/docx

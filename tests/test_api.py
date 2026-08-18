@@ -184,6 +184,58 @@ def test_scan_unsupported_file_type_rejected(client, api_key):
     assert resp.status_code == 422
 
 
+# ---------------------------------------------------- round 2 categories ----
+
+
+def test_detects_pem_private_key(scan):
+    resp = scan(
+        "Server config:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n"
+        "-----END RSA PRIVATE KEY-----\nDo not share."
+    )
+    assert "CRYPTO_PRIVATE_KEY" in entity_types(resp)
+
+
+def test_detects_private_ip_cidr(scan):
+    resp = scan(
+        "Sơ đồ mạng: gateway nội bộ tại 10.20.5.1/24, subnet backup 192.168.1.0/24.",
+        confidence_threshold=0.4,
+    )
+    assert "INFRA_NETWORK_MAP" in entity_types(resp)
+
+
+def test_gps_coordinates_need_context_to_clear_default_threshold(scan):
+    # Same decimal-pair shape can appear in non-location text (e.g. pixel
+    # dimensions) — must NOT fire at the default threshold without context.
+    no_context = scan("Kích thước ảnh: 21.038300, 105.782900 pixel.", confidence_threshold=0.7)
+    with_context = scan(
+        "Toạ độ GPS của kho hàng: 21.038300, 105.782900.", confidence_threshold=0.3
+    )
+    assert "GPS_LOCATION" not in entity_types(no_context)
+    assert "GPS_LOCATION" in entity_types(with_context)
+
+
+def test_financial_credential_with_banking_context_outscores_bare(scan):
+    # The longer descriptive gap here ("ngân hàng của tài khoản công ty", ~33
+    # chars) is deliberate: an earlier regex capped the keyword-to-value gap
+    # at 30 chars and silently failed to match this exact realistic phrasing.
+    with_ctx = scan(
+        "Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2.", confidence_threshold=0.3
+    )
+    without_ctx = scan("Mật khẩu wifi quán cafe là: Xk9pL2.", confidence_threshold=0.3)
+
+    ctx_scores = [
+        e["score"] for e in with_ctx.json()["detected_entities"] if e["entity_type"] == "FINANCIAL_CREDENTIAL"
+    ]
+    bare_scores = [
+        e["score"]
+        for e in without_ctx.json()["detected_entities"]
+        if e["entity_type"] == "FINANCIAL_CREDENTIAL"
+    ]
+    assert ctx_scores, "banking-context password should be detected"
+    assert bare_scores, "bare password assignment should still be detected (weakly)"
+    assert max(ctx_scores) > max(bare_scores)
+
+
 def test_tax_code_context_outscores_bare_digits(scan):
     with_ctx = scan("Mã số thuế doanh nghiệp: 1234567890", confidence_threshold=0.2)
     without_ctx = scan("Random id: 1234567890", confidence_threshold=0.2)

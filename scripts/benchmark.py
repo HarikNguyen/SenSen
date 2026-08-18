@@ -30,6 +30,10 @@ CUSTOM_ENTITY_TYPES = {
     "EMPLOYEE_ID",
     "INFRA_SECRET",
     "IP_SENSITIVE_MARKER",
+    "CRYPTO_PRIVATE_KEY",
+    "INFRA_NETWORK_MAP",
+    "GPS_LOCATION",
+    "FINANCIAL_CREDENTIAL",
 }
 
 SAMPLE_DOCS = [
@@ -43,6 +47,10 @@ SAMPLE_DOCS = [
     "Điều khoản bồi thường vi phạm NDA quy định mức phạt tối đa 200.000.000 VND.",
     "Vui lòng liên hệ qua email support@company.com hoặc hotline 0987654321 để được hỗ trợ.",
     "JWT token phiên đăng nhập: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    "Server backup key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+    "Sơ đồ mạng nội bộ: gateway tại 10.20.5.1/24, subnet backup 192.168.1.0/24, firewall chặn ngoài VPC.",
+    "Toạ độ GPS kho hàng: 21.038300, 105.782900 — cần bảo mật.",
+    "Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2, chỉ kế toán trưởng được biết.",
 ]
 DOCS = SAMPLE_DOCS * 5  # 50 docs total — enough for a stable timing signal
 
@@ -91,7 +99,7 @@ def main():
 
     results = [
         run(baseline, "Vanilla Presidio (default recognizers only)"),
-        run(custom, "SenSen (default + 5 custom enterprise categories)"),
+        run(custom, "SenSen (default + 10 custom enterprise categories)"),
     ]
 
     lines = [
@@ -101,7 +109,7 @@ def main():
         f"repeated from {len(SAMPLE_DOCS)} templates). Same shared spaCy "
         f"`en_core_web_sm` NLP engine in both runs — only the recognizer set differs.",
         "",
-        "| Engine | Mean ms/doc | p95 ms/doc | Total entities | Custom-category hits (of 6 new types) |",
+        "| Engine | Mean ms/doc | p95 ms/doc | Total entities | Custom-category hits (of 10 new types) |",
         "|---|---|---|---|---|",
     ]
     for r in results:
@@ -127,7 +135,8 @@ def main():
         "(see thongtin.md's own i3 analysis).",
         "- \"Custom-category hits\" is 0 for vanilla Presidio by construction: "
         "CONTRACT_ID, INTERNAL_TAX_CODE, FINANCIAL_METRIC, EMPLOYEE_ID, "
-        "INFRA_SECRET and IP_SENSITIVE_MARKER don't exist in stock Presidio at "
+        "INFRA_SECRET, IP_SENSITIVE_MARKER, CRYPTO_PRIVATE_KEY, INFRA_NETWORK_MAP, "
+        "GPS_LOCATION and FINANCIAL_CREDENTIAL don't exist in stock Presidio at "
         "all — this row is the quantified version of the \"gap\" thongtin.md "
         "opens with, not a tuning artifact.",
     ]
