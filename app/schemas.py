@@ -1,4 +1,4 @@
-"""Pydantic request/response contracts — matches the API spec in thongtin.md section 2."""
+"""Pydantic request/response contracts for the scan API."""
 
 from typing import Optional
 

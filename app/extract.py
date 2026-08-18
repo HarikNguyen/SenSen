@@ -1,9 +1,6 @@
 """Digital-text extraction for PDF/DOCX/TXT — no OCR.
 
-thongtin.md's own MVP guidance (and the i3-hardware analysis) is explicit:
-skip OCR on day 1, only handle documents that already carry a text layer.
-Scanned/image PDFs raise UnsupportedFileType with a pointer to the OCR
-roadmap (Azure AI Document Intelligence) — see README.
+Scanned/image PDFs raise UnsupportedFileType; OCR is a roadmap item (see README).
 """
 
 import io
@@ -55,9 +52,7 @@ def _extract_docx(raw: bytes) -> tuple[str, str, int]:
     document = Document(io.BytesIO(raw))
     parts = [p.text for p in document.paragraphs]
 
-    # Flatten tables to pipe-delimited rows so financial figures / IDs sitting
-    # in cells keep enough surrounding context for the recognizers' context
-    # scoring (thongtin.md 3.2: "Bảng biểu... nối lại thành chuỗi tuần tự").
+    # Flatten tables to pipe-delimited rows so cell values keep context for scoring.
     for table in document.tables:
         for row in table.rows:
             parts.append(" | ".join(cell.text for cell in row.cells))

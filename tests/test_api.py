@@ -1,8 +1,4 @@
-"""Positive / negative / ambiguous detection cases + auth flow.
-
-Mirrors the explicit deliverable in thongtin.md section 3 (Đầu ra):
-"Tập dữ liệu kiểm thử tự động (Test Suite gồm các ca dương tính, âm tính, mập mờ)".
-"""
+"""Positive / negative / ambiguous detection cases + auth flow."""
 
 import io
 import uuid
@@ -98,15 +94,13 @@ def test_anonymize_masks_email(scan):
 
 
 def test_generic_sentence_has_no_high_confidence_hits(scan):
-    # Deliberately avoids names/dates/orgs so spaCy's English NER has nothing
-    # to (mis)fire on — a clean negative control.
+    # Avoids names/dates/orgs so spaCy's NER has nothing to misfire on.
     resp = scan("The quick brown fox jumps over the lazy dog.", confidence_threshold=0.7)
     assert resp.json()["detected_entities"] == []
 
 
 def test_short_numbers_not_flagged_as_contract(scan):
-    # thongtin.md 2.B's motivating false-positive scenario: a random number
-    # sequence in a spreadsheet must not be mistaken for a sensitive code.
+    # A random number sequence must not be mistaken for a sensitive code.
     resp = scan("Row values: 42, 17, 93, 8", confidence_threshold=0.7)
     assert "CONTRACT_ID" not in entity_types(resp)
 
@@ -115,8 +109,7 @@ def test_short_numbers_not_flagged_as_contract(scan):
 
 
 def test_generic_code_shape_filtered_at_default_threshold_without_context(scan):
-    # Same shape family as a real contract id (LETTERS-digits-alnum) but with
-    # no legal/contractual context nearby -> weak pattern, score 0.3.
+    # Same shape as a contract id but with no legal context nearby.
     text = "Reference AB-12-XY9Z used for internal tracking only."
     strict = scan(text, confidence_threshold=0.7)
     loose = scan(text, confidence_threshold=0.2)
@@ -125,9 +118,7 @@ def test_generic_code_shape_filtered_at_default_threshold_without_context(scan):
 
 
 def test_mobile_number_not_misread_as_tax_code(scan):
-    # VN mobile numbers (prefix 03/05/07/08/09) must not collide with the
-    # INTERNAL_TAX_CODE pattern - see the mobile-prefix exclusion in
-    # app/recognizers/recognizers.yaml.
+    # VN mobile numbers must not collide with INTERNAL_TAX_CODE (see recognizers.yaml).
     resp = scan("Gọi tôi qua số 0912345678 nhé.", confidence_threshold=0.2)
     assert "INTERNAL_TAX_CODE" not in entity_types(resp)
 
@@ -204,8 +195,7 @@ def test_detects_private_ip_cidr(scan):
 
 
 def test_gps_coordinates_need_context_to_clear_default_threshold(scan):
-    # Same decimal-pair shape can appear in non-location text (e.g. pixel
-    # dimensions) — must NOT fire at the default threshold without context.
+    # Same shape appears in non-location text (e.g. pixel dims) without context.
     no_context = scan("Kích thước ảnh: 21.038300, 105.782900 pixel.", confidence_threshold=0.7)
     with_context = scan(
         "Toạ độ GPS của kho hàng: 21.038300, 105.782900.", confidence_threshold=0.3
@@ -215,9 +205,7 @@ def test_gps_coordinates_need_context_to_clear_default_threshold(scan):
 
 
 def test_financial_credential_with_banking_context_outscores_bare(scan):
-    # The longer descriptive gap here ("ngân hàng của tài khoản công ty", ~33
-    # chars) is deliberate: an earlier regex capped the keyword-to-value gap
-    # at 30 chars and silently failed to match this exact realistic phrasing.
+    # Longer gap here is deliberate — an earlier 30-char cap missed this phrasing.
     with_ctx = scan(
         "Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2.", confidence_threshold=0.3
     )

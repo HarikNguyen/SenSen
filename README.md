@@ -4,21 +4,19 @@ A Presidio-powered API that finds standard PII *and* ten enterprise-specific
 sensitive-data categories (Legal, Financial, HR, Security/Infra, IP, plus a
 round-2 batch: crypto keys, network maps, GPS, financial credentials) in
 text, PDF and DOCX documents, scores confidence with context-aware
-validation, and can return an anonymized copy. Built from the spec in
-`thongtin.md`, then extended using the taxonomy research in the project
-report (definition of "sensitive data" synthesized from 5 legal frameworks +
-3 market DLP products).
+validation, and can return an anonymized copy.
 
 Status: **working local MVP** — 24/24 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
 
-Every non-obvious choice below traded off against the 9 criteria this project
-was optimized for (Azure student credit, a weak local machine, free APIs,
-time, risk, real-world usefulness, a presentable web page, and leaning on
-existing prior art wherever possible). Where a claim depends on something
-outside this repo (a cloud free-tier limit, a library's behavior), it's cited.
+Every non-obvious choice below traded off against a fixed set of criteria
+this project was optimized for (Azure student credit, a weak local machine,
+free APIs, time, risk, real-world usefulness, a presentable web page, and
+leaning on existing prior art wherever possible). Where a claim depends on
+something outside this repo (a cloud free-tier limit, a library's behavior),
+it's cited.
 
 ### Architecture
 
@@ -40,27 +38,27 @@ outside this repo (a cloud free-tier limit, a library's behavior), it's cited.
                                      [ JSON response ]
 
   Layer 5 (persistence, all layers can reach it): SQLite + SQLAlchemy — User,
-  APIKey, request_count only. Document text is never written to disk or DB,
-  per thongtin.md's zero-trust requirement (in-RAM only, for the request's lifetime).
+  APIKey, request_count only. Document text is never written to disk or DB —
+  zero-trust by design, in-RAM only for the request's lifetime.
 ```
 
 ### The extensibility requirement came (almost) for free
 
-`thongtin.md` section 2.D asks for a "modular, plugin-based" system where a
-6th/7th category can be added "without touching core code." Rather than
-building a custom plugin framework, this uses Presidio's own **native
-config-driven recognizer registry** (`RecognizerRegistryProvider` /
-`AnalyzerEngineProvider`) — confirmed against the installed package's own
+The design goal was a modular, plugin-based system where a 6th/7th category
+can be added without touching core code. Rather than building a custom
+plugin framework, this uses Presidio's own **native config-driven recognizer
+registry** (`RecognizerRegistryProvider` / `AnalyzerEngineProvider`) —
+confirmed against the installed package's own
 `presidio_analyzer/conf/{default_recognizers,example_recognizers}.yaml` and
 the [official docs](https://microsoft.github.io/presidio/analyzer/recognizer_registry_provider/).
 **All 10 custom categories live entirely in `app/recognizers/recognizers.yaml`
 — `app/main.py` never changed when the second batch of 4 was added, and won't
 change for the next one either.** See "Adding a new category" below.
 
-### Why Azure Container Apps instead of the App Service the spec suggested
+### Why Azure Container Apps instead of App Service
 
-`thongtin.md`'s own Azure section proposed App Service. Verified against
-current [Azure pricing docs](https://azure.microsoft.com/en-us/pricing/details/app-service/)
+App Service was the first option considered. Verified against current
+[Azure pricing docs](https://azure.microsoft.com/en-us/pricing/details/app-service/)
 and [Container Apps pricing](https://azure.microsoft.com/en-us/pricing/details/container-apps/):
 
 | | Free (F1) App Service | Container Apps (Consumption) |
@@ -89,9 +87,9 @@ the real free options; see `Deployment` below.
 URL, IP, credit card, IBAN, crypto, MAC address, US SSN) instead of loading
 Presidio's full default set (50+ recognizers, many country-specific: UK NINO,
 IN Aadhaar, KR RRN...). Benchmarked side by side in `scripts/benchmark.py` —
-the curated set is actually **faster** (17.7ms vs 26.9ms mean/doc) despite
-adding 5 new categories, purely from evaluating fewer irrelevant regexes per
-request. Run it yourself: `python scripts/benchmark.py` (writes
+the curated set is actually **faster** (16.8ms vs 23.7ms mean/doc) despite
+adding 10 custom categories, purely from evaluating fewer irrelevant regexes
+per request. Run it yourself: `python scripts/benchmark.py` (writes
 `BENCHMARK.md`).
 
 ## Quickstart
@@ -134,14 +132,13 @@ python scripts/assess_corpus.py /path/to/real/documents
 at a folder, it scans every `.txt/.pdf/.docx` in it and ranks documents by a
 weighted risk score (live secrets > contract/financial/HR IDs > IP markers),
 so a human reviewer knows which document to open first instead of reading a
-flat entity dump. This is the "Assessment Report" deliverable from
-thongtin.md section 3 applied to a whole corpus rather than one file — see
-`ASSESSMENT_REPORT.md` for a real run against the 7 synthetic documents in
-`sample_corpus/` (all fake data, safe to commit).
+flat entity dump — turns single-document scanning into a corpus-wide audit.
+See `ASSESSMENT_REPORT.md` for a real run against the 8 synthetic documents
+in `sample_corpus/` (all fake data, safe to commit).
 
 ## The 10 custom categories
 
-| Category (thongtin.md 2.A) | entity_type | Signal |
+| Category | entity_type | Signal |
 |---|---|---|
 | A. Legal & Contractual | `CONTRACT_ID` | `HD/HĐ/NDA-YYYY-XXXX` (strong) + generic `LETTERS-##-ALNUM` (weak, needs context) |
 | B. Financial — tax code | `INTERNAL_TAX_CODE` | 10/13-digit MST, VN mobile prefixes (03/05/07/08/09) excluded to cut phone-number collisions |
@@ -150,8 +147,9 @@ thongtin.md section 3 applied to a whole corpus rather than one file — see
 | D. Security & Infra | `INFRA_SECRET` | AWS keys, `sk-...` keys, JWTs, DB connection strings — patterns adapted from [gitleaks' public ruleset](https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml) |
 | E. Intellectual Property | `IP_SENSITIVE_MARKER` | Deliberately **low-confidence** — flags "CONFIDENTIAL/proprietary/trade secret" markers for human review. Regex fundamentally cannot detect trade secrets/source code reliably; this category is a review flag, not a detector. Stated here on purpose rather than overclaiming precision it can't have. |
 
-Round 2 (added from the taxonomy research below — chosen because they scored
-"khả thi ngay bằng regex", same risk profile as round 1):
+Round 2 (chosen because they're regex-feasible, same risk profile as round 1
+— unlike the many other candidate categories that need real semantic/topic
+classification):
 
 | Category | entity_type | Signal |
 |---|---|---|
@@ -178,7 +176,7 @@ Add a block to `app/recognizers/recognizers.yaml`:
 Restart the app. That's the entire integration surface — this is what
 "modular/plugin-based, no core code changes" means concretely.
 
-**Gotchas to know about** (both cost a debug cycle building this):
+**Gotchas to know about** (all three cost a debug cycle building this):
 
 1. Presidio's context matcher compares your `context` words against
    **individual surrounding token lemmas** — a multi-word phrase like
@@ -186,7 +184,7 @@ Restart the app. That's the entire integration surface — this is what
    token's lemma equals a two-word string. Use single words. See the comment
    block at the top of the `recognizers` list in `recognizers.yaml` for the
    full explanation and the fix applied throughout
-   (`context_prefix_count`/`context_suffix_count` widened to 5/5 in
+   (`context_prefix_count`/`context_suffix_count` widened to 8/8 in
    `app/main.py` so context words on either side of a match count, not just
    before it).
 2. For any `"keyword ... value"` pattern (like `FINANCIAL_CREDENTIAL`'s
@@ -215,17 +213,17 @@ Restart the app. That's the entire integration surface — this is what
   Fix requires a Vietnamese-aware model (`vi_spacy` or `underthesea`) — sized
   as a roadmap item, not day-1 scope, to protect the build timeline.
 - **No OCR.** Scanned/image PDFs raise a clear 422, not a silent failure.
-  Deliberate: `thongtin.md`'s own hardware analysis flags OCR as the CPU
-  "sát thủ phần cứng" (hardware killer) to avoid on an i3, and Azure AI
-  Document Intelligence's free F0 tier only analyzes the **first 2 pages** of
-  any document regardless of the 500-pages/month pool ([official
+  Deliberate: OCR is the CPU "sát thủ phần cứng" (hardware killer) to avoid
+  on weak local hardware, and Azure AI Document Intelligence's free F0 tier
+  only analyzes the **first 2 pages** of any document regardless of the
+  500-pages/month pool ([official
   limits](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/service-limits?view=doc-intel-4.0.0))
   — not good enough for real multi-page contracts without upgrading to paid
   S0. See Roadmap.
 - **Digit-pattern ambiguity is inherent, not fully solved.** VN tax codes and
   phone numbers are both 10 digits; the mobile-prefix exclusion handles the
-  common case, not all of it. This is exactly the precision problem
-  `thongtin.md` 2.B describes — mitigated, not eliminated, by regex alone.
+  common case, not all of it — an inherent precision tradeoff of
+  regex-based detection, mitigated rather than eliminated.
 - **`saas.db` is a local file**, fine for MVP/demo, not for concurrent
   production writers — swap the `DATABASE_URL` env var (`SENSEN_DATABASE_URL`)
   for Postgres when that matters.
@@ -238,10 +236,10 @@ Restart the app. That's the entire integration surface — this is what
    not stubbed in this repo to avoid shipping untested cloud-integration code.
 2. **LLM second-opinion validator** (Gemini free tier via Google AI Studio,
    no card required) for entities scoring in the ambiguous 0.4–0.7 band, to
-   push precision further per `thongtin.md` 2.B. Verified free-tier access
-   works, but Google cut quotas 50-80% in Dec 2025 — call it selectively
-   (borderline-confidence hits only) with a skip-on-quota-exhaustion fallback,
-   never as a hard dependency.
+   push precision further. Verified free-tier access works, but Google cut
+   quotas 50-80% in Dec 2025 — call it selectively (borderline-confidence
+   hits only) with a skip-on-quota-exhaustion fallback, never as a hard
+   dependency.
 3. **Vietnamese NLP**: `vi_spacy` (spaCy-compatible, least glue code to plug
    into Presidio's existing `NlpEngine` interface) or `underthesea`.
 4. **Render.com fallback deploy** if Azure setup friction blocks a demo
@@ -303,6 +301,6 @@ static/index.html     Minimal demo console (paste text, see highlighted hits)
 tests/                21 detection tests (positive/negative/ambiguous) + 3 file-upload tests + auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
-sample_corpus/         7 synthetic (fake-data) documents exercising all 5 categories + txt/pdf/docx
+sample_corpus/         8 synthetic (fake-data) documents exercising all 10 categories + txt/pdf/docx
 Dockerfile             Ready for Azure Container Apps / Render / any Docker host
 ```

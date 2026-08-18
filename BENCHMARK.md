@@ -4,8 +4,8 @@ Corpus: 70 synthetic enterprise-style documents (mixed VN/EN, repeated from 14 t
 
 | Engine | Mean ms/doc | p95 ms/doc | Total entities | Custom-category hits (of 10 new types) |
 |---|---|---|---|---|
-| Vanilla Presidio (default recognizers only) | 23.67 | 24.57 | 165 | 0 |
-| SenSen (default + 10 custom enterprise categories) | 16.83 | 24.21 | 245 | 80 |
+| Vanilla Presidio (default recognizers only) | 40.18 | 46.81 | 165 | 0 |
+| SenSen (default + 10 custom enterprise categories) | 28.78 | 38.51 | 245 | 80 |
 
 ## Entity type breakdown
 
@@ -41,5 +41,5 @@ Corpus: 70 synthetic enterprise-style documents (mixed VN/EN, repeated from 14 t
 
 ## Reading this
 
-- Latency difference between the two rows is the **cost of the 5 new categories** (regex + context scoring) — expected to be small since regex is C-engine and runs in milliseconds even on modest CPUs (see thongtin.md's own i3 analysis).
-- "Custom-category hits" is 0 for vanilla Presidio by construction: CONTRACT_ID, INTERNAL_TAX_CODE, FINANCIAL_METRIC, EMPLOYEE_ID, INFRA_SECRET, IP_SENSITIVE_MARKER, CRYPTO_PRIVATE_KEY, INFRA_NETWORK_MAP, GPS_LOCATION and FINANCIAL_CREDENTIAL don't exist in stock Presidio at all — this row is the quantified version of the "gap" thongtin.md opens with, not a tuning artifact.
+- Latency difference between the two rows is the **cost of the 10 new categories** (regex + context scoring) — expected to be small since regex is C-engine and runs in milliseconds even on modest CPUs.
+- "Custom-category hits" is 0 for vanilla Presidio by construction: CONTRACT_ID, INTERNAL_TAX_CODE, FINANCIAL_METRIC, EMPLOYEE_ID, INFRA_SECRET, IP_SENSITIVE_MARKER, CRYPTO_PRIVATE_KEY, INFRA_NETWORK_MAP, GPS_LOCATION and FINANCIAL_CREDENTIAL don't exist in stock Presidio at all — this row quantifies the coverage gap these categories close, not a tuning artifact.

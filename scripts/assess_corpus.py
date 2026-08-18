@@ -1,14 +1,7 @@
-"""Batch-scan a document corpus and produce an audit-style Assessment Report.
+"""Batch-scan a corpus and produce a risk-ranked Assessment Report — which of
+many documents to look at first, not just what's in one file.
 
-This is the "Báo cáo kiểm toán trạng thái hiện tại (Assessment Report)"
-deliverable from thongtin.md section 3 — the single-document /api/v1/scan
-endpoint answers "what's in this file"; this script answers the actual
-business question from thongtin.md 1.1 ("khối lượng tài liệu nội bộ khổng lồ"
-— which of these hundreds of documents should a human look at first).
-
-Usage (from repo root, venv active):
-    python scripts/assess_corpus.py [directory]   # defaults to sample_corpus/
-
+Usage: python scripts/assess_corpus.py [directory]   # defaults to sample_corpus/
 Writes ASSESSMENT_REPORT.md and prints a summary to stdout.
 """
 
@@ -24,9 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_SUFFIXES = {".txt", ".pdf", ".docx"}
 CONFIDENCE_THRESHOLD = 0.5
 
-# Severity weighting drives the "look at this first" ranking below — not a
-# statement that lower tiers are safe, just a triage order for a human
-# reviewer working through a large corpus.
+# Weighting drives triage order below, not a safety verdict for lower tiers.
 SEVERITY = {
     "INFRA_SECRET": ("critical", 3),
     "CRYPTO_PRIVATE_KEY": ("critical", 3),

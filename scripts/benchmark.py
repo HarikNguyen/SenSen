@@ -1,8 +1,6 @@
 """Benchmark: vanilla Presidio vs. SenSen's custom registry.
 
-Produces the "Bảng đo lường hiệu năng benchmark (So sánh tốc độ và độ chính xác
-trước và sau khi tối ưu)" deliverable from thongtin.md section 3. Run from the
-repo root with the venv active:
+Run from the repo root with the venv active:
 
     python scripts/benchmark.py
 
@@ -129,16 +127,15 @@ def main():
     lines += [
         "## Reading this",
         "",
-        "- Latency difference between the two rows is the **cost of the 5 new "
+        "- Latency difference between the two rows is the **cost of the 10 new "
         "categories** (regex + context scoring) — expected to be small since "
-        "regex is C-engine and runs in milliseconds even on modest CPUs "
-        "(see thongtin.md's own i3 analysis).",
+        "regex is C-engine and runs in milliseconds even on modest CPUs.",
         "- \"Custom-category hits\" is 0 for vanilla Presidio by construction: "
         "CONTRACT_ID, INTERNAL_TAX_CODE, FINANCIAL_METRIC, EMPLOYEE_ID, "
         "INFRA_SECRET, IP_SENSITIVE_MARKER, CRYPTO_PRIVATE_KEY, INFRA_NETWORK_MAP, "
         "GPS_LOCATION and FINANCIAL_CREDENTIAL don't exist in stock Presidio at "
-        "all — this row is the quantified version of the \"gap\" thongtin.md "
-        "opens with, not a tuning artifact.",
+        "all — this row quantifies the coverage gap these categories close, "
+        "not a tuning artifact.",
     ]
 
     report = "\n".join(lines)

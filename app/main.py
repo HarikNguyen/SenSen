@@ -38,10 +38,9 @@ RECOGNIZERS_CONF = BASE_DIR / "app" / "recognizers" / "recognizers.yaml"
 
 CONTEXT_WINDOW = 40  # chars of surrounding text captured in context_snippet
 MAX_TEXT_LENGTH = 50_000  # guardrail for the target low-RAM (i3) host
-SUPPORTED_LANGUAGES = {"en"}  # custom recognizers are tagged supported_language: en;
-# Vietnamese-specific NLP (vi_spacy/underthesea) is a roadmap item, see README.
-# Vietnamese *content* is still scanned fine under the "en" profile since all
-# 5 custom categories are regex/context-based, not dependent on spaCy's NER.
+SUPPORTED_LANGUAGES = {"en"}
+# Vietnamese content still scans fine under "en" (categories are regex-based,
+# not NER-dependent) — a real Vietnamese model is a roadmap item, see README.
 
 
 def build_engines() -> tuple[AnalyzerEngine, AnonymizerEngine]:
@@ -57,14 +56,8 @@ def build_engines() -> tuple[AnalyzerEngine, AnonymizerEngine]:
         conf_file=str(RECOGNIZERS_CONF), nlp_engine=nlp_engine
     ).create_recognizer_registry()
 
-    # Widen the context window to look both before AND after a match (default is
-    # prefix-only, 5 words). thongtin.md 2.B asks for context words "xung quanh"
-    # (around) a match, not just preceding it — matters a lot for Vietnamese
-    # sentences where the qualifying word often comes after the number/code.
-    # 8 (not Presidio's default 5) because Vietnamese phrasing routinely puts
-    # 6-8 filler words between a label like "Toạ độ GPS" and its value (seen
-    # twice in practice: scripts/benchmark.py and sample_corpus/ both hit this
-    # before the window was widened here).
+    # Widened to 8/8 (Presidio default: 5, prefix-only) — Vietnamese phrasing
+    # often puts several filler words between a label and its value.
     context_enhancer = LemmaContextAwareEnhancer(
         context_prefix_count=8, context_suffix_count=8
     )
