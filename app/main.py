@@ -61,8 +61,12 @@ def build_engines() -> tuple[AnalyzerEngine, AnonymizerEngine]:
     # prefix-only, 5 words). thongtin.md 2.B asks for context words "xung quanh"
     # (around) a match, not just preceding it — matters a lot for Vietnamese
     # sentences where the qualifying word often comes after the number/code.
+    # 8 (not Presidio's default 5) because Vietnamese phrasing routinely puts
+    # 6-8 filler words between a label like "Toạ độ GPS" and its value (seen
+    # twice in practice: scripts/benchmark.py and sample_corpus/ both hit this
+    # before the window was widened here).
     context_enhancer = LemmaContextAwareEnhancer(
-        context_prefix_count=5, context_suffix_count=5
+        context_prefix_count=8, context_suffix_count=8
     )
 
     analyzer = AnalyzerEngine(

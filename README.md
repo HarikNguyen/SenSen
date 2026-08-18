@@ -196,6 +196,14 @@ Restart the app. That's the entire integration surface — this is what
    ty là: X" alone is ~33 chars of filler, past a 30-char cap. Size the gap
    generously (60 chars here) and add a test with a realistically wordy
    sentence, not just the shortest phrasing that happens to work.
+3. spaCy's English lemmatizer mangles foreign acronyms it doesn't recognize —
+   `"GPS"` lemmatizes to `"gp"` (stripped as if it were a plural "s"), so a
+   context word of `"gps"` silently never matches. Caught by direct
+   inspection of `nlp_engine.process_text(...).keywords`, not by guessing.
+   No general fix (whack-a-mole to list every mangled variant); the practical
+   mitigation is keeping context words physically close to the value in your
+   test/sample text, since Vietnamese-under-English-pipeline context matching
+   is already documented above as best-effort, not guaranteed.
 
 ## Known limitations (read before demoing)
 

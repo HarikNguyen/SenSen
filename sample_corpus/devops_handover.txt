@@ -1,0 +1,14 @@
+TÀI LIỆU CHUYỂN GIAO HẠ TẦNG — DEVOPS TEAM
+
+Sơ đồ mạng nội bộ: gateway chính tại 10.20.5.1/24, subnet dự phòng 192.168.1.0/24.
+Không public dải này ra ngoài internet.
+
+Backup key máy chủ CI/CD:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA1c7+9z5Pad7OejecsQ0bu3aumgIJemALQTOtNz/nq6IUvKtV
+-----END RSA PRIVATE KEY-----
+
+Toạ độ trung tâm dữ liệu dự phòng — 21.038300, 105.782900 — là thông tin hạn chế.
+
+Mật khẩu ngân hàng của tài khoản thanh toán nhà cung cấp cloud là: Qz7mN4x2,
+chỉ trưởng phòng hạ tầng được biết.
