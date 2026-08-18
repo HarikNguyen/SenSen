@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.engine import build_engines
 from app.extract import UnsupportedFileType, extract_text
-from app.main import build_engines
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUPPORTED_SUFFIXES = {".txt", ".pdf", ".docx"}

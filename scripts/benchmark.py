@@ -15,11 +15,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from presidio_analyzer import AnalyzerEngine
-from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_analyzer.recognizer_registry import RecognizerRegistryProvider
 
+from app.engine import RECOGNIZERS_CONF, build_nlp_engine
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RECOGNIZERS_CONF = REPO_ROOT / "app" / "recognizers" / "recognizers.yaml"
 
 CUSTOM_ENTITY_TYPES = {
     "CONTRACT_ID",
@@ -51,15 +51,6 @@ SAMPLE_DOCS = [
     "Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2, chỉ kế toán trưởng được biết.",
 ]
 DOCS = SAMPLE_DOCS * 5  # 50 docs total — enough for a stable timing signal
-
-
-def build_nlp_engine():
-    return NlpEngineProvider(
-        nlp_configuration={
-            "nlp_engine_name": "spacy",
-            "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-        }
-    ).create_engine()
 
 
 def run(analyzer: AnalyzerEngine, label: str):

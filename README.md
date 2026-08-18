@@ -52,7 +52,7 @@ confirmed against the installed package's own
 `presidio_analyzer/conf/{default_recognizers,example_recognizers}.yaml` and
 the [official docs](https://microsoft.github.io/presidio/analyzer/recognizer_registry_provider/).
 **All 10 custom categories live entirely in `app/recognizers/recognizers.yaml`
-— `app/main.py` never changed when the second batch of 4 was added, and won't
+— no app code changed when the second batch of 4 was added, and none will
 change for the next one either.** See "Adding a new category" below.
 
 ### Why Azure Container Apps instead of App Service
@@ -185,8 +185,8 @@ Restart the app. That's the entire integration surface — this is what
    block at the top of the `recognizers` list in `recognizers.yaml` for the
    full explanation and the fix applied throughout
    (`context_prefix_count`/`context_suffix_count` widened to 8/8 in
-   `app/main.py` so context words on either side of a match count, not just
-   before it).
+   `app/engine.py` so context words on either side of a match count, not
+   just before it).
 2. For any `"keyword ... value"` pattern (like `FINANCIAL_CREDENTIAL`'s
    PIN/password assignment), a fixed-width gap between the keyword and the
    value (e.g. `.{0,30}?`) will silently fail to match once real sentences
@@ -291,7 +291,10 @@ is ephemeral by default — for the MVP demo this is fine since state is just
 
 ```text
 app/
-  main.py             FastAPI app, auth, /register, /api/v1/scan, /api/v1/scan/file
+  main.py             Web layer only: routes, dependency wiring, app lifecycle
+  engine.py           Presidio construction (spaCy + recognizer registry)
+  scanning.py         Core scan logic: analyze -> entities -> optional anonymize
+  auth.py             X-API-Key verification dependency
   database.py         SQLAlchemy models: User, APIKey
   schemas.py          Pydantic request/response contracts
   extract.py          PDF/DOCX/TXT -> plain text (no OCR)
