@@ -291,7 +291,9 @@ is ephemeral by default — for the MVP demo this is fine since state is just
 
 ```text
 app/
-  main.py             Web layer only: routes, dependency wiring, app lifecycle
+  main.py             App factory only: FastAPI instance, lifespan, static mount, router include
+  pages.py            Routing layer: thin HTTP handlers (APIRouter), no business logic
+  logics.py           Business logic the routes call (currently: registration)
   engine.py           Presidio construction (spaCy + recognizer registry)
   scanning.py         Core scan logic: analyze -> entities -> optional anonymize
   auth.py             X-API-Key verification dependency
