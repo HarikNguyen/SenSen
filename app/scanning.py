@@ -50,6 +50,46 @@ def _drop_lower_scored_exact_duplicates(results: list) -> list:
     return list(best_by_span.values())
 
 
+# Entity types deep scan can also produce (currently just ORGANIZATION, see
+# app/deep_scan.py) -- an overlap between the free regex/NER path and deep
+# scan on one of *these* types means "two interpretations of the same real
+# thing" (e.g. underthesea's truncated "Toàn Cầu" vs. deep scan's full
+# "Công ty Cổ phần Đầu Tư Toàn Cầu"), not "two different facts." Deliberately
+# not applied to IP_TRADE_SECRET_CONTENT/HR_SENSITIVE_CONTENT, which flag a
+# whole sentence and routinely overlap a PHONE_NUMBER or similar mentioned
+# inside it -- those are genuinely separate findings, not competing spans
+# for the same value, and must never be dropped just for falling inside one.
+_DEEP_SCAN_OVERLAP_TYPES = {"ORGANIZATION", "PERSON", "LOCATION"}
+
+
+def _drop_regex_ner_entities_overlapped_by_deep_scan(
+    base_entities: list, deep_entities: list
+) -> list:
+    """When deep scan (an opt-in, paid verification pass) finds an
+    ORGANIZATION/PERSON/LOCATION entity whose span overlaps one the free
+    regex/NER path already found of the same type, keep only deep scan's —
+    that's the reason a caller paid for the extra Gemini call. Span overlap
+    rather than exact-match dedup (see _drop_lower_scored_exact_duplicates
+    above) because the spans genuinely differ in width, not just score:
+    underthesea's is a truncated substring of deep scan's fuller one.
+    """
+    competing_deep = [d for d in deep_entities if d.entity_type in _DEEP_SCAN_OVERLAP_TYPES]
+    if not competing_deep:
+        return base_entities
+
+    def overlaps(a: DetectedEntity, b: DetectedEntity) -> bool:
+        return a.location.start < b.location.end and b.location.start < a.location.end
+
+    return [
+        e
+        for e in base_entities
+        if not (
+            e.entity_type in _DEEP_SCAN_OVERLAP_TYPES
+            and any(overlaps(e, d) for d in competing_deep)
+        )
+    ]
+
+
 def run_scan(
     text: str,
     language: str,
@@ -101,6 +141,7 @@ def run_scan(
     deep_scan_status = None
     if deep_scan:
         deep_entities, deep_scan_status = run_deep_scan(text, model_id=deep_scan_model)
+        entities = _drop_regex_ner_entities_overlapped_by_deep_scan(entities, deep_entities)
         entities.extend(deep_entities)
         entities.sort(key=lambda e: e.location.start)
         # Note: deep_entities are not passed through anonymizer.anonymize()

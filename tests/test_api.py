@@ -428,6 +428,41 @@ def test_deep_scan_organization_merges_into_response(client, api_key, monkeypatc
     assert body["deep_scan_status"] == "ok"
     entities = {(e["entity_type"], e["text_val"]) for e in body["detected_entities"]}
     assert ("ORGANIZATION", "Công ty Cổ phần Đầu Tư Toàn Cầu") in entities
+    # The free regex+NER path finds "Toàn Cầu" as its own (wrong-type,
+    # truncated) LOCATION on this exact text -- deep scan's overlapping,
+    # fuller ORGANIZATION should replace it, not sit alongside it.
+    assert ("LOCATION", "Toàn Cầu") not in entities
+
+
+def test_deep_scan_overlap_dedup_does_not_drop_unrelated_nested_entities(
+    client, api_key, monkeypatch
+):
+    # Guard against the overlap-based dedup above being too aggressive:
+    # HR_SENSITIVE_CONTENT/IP_TRADE_SECRET_CONTENT flag a whole sentence and
+    # routinely contain a PHONE_NUMBER or similar mentioned inside it --
+    # that's a separate real finding, not a competing interpretation of the
+    # same value, and must never be dropped just for being inside the span.
+    text = "Nhân viên bị khiển trách do vi phạm, SĐT liên hệ 0912345678."
+
+    def _fake(text, model_id=None):
+        entity = DetectedEntity(
+            entity_type="HR_SENSITIVE_CONTENT",
+            location=EntityLocation(start=0, end=len(text)),
+            text_val=text,
+            score=0.6,
+            context_snippet=text,
+        )
+        return [entity], "ok"
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _fake)
+    resp = client.post(
+        "/api/v1/scan",
+        json={"text": text, "deep_scan": True, "confidence_threshold": 0.3},
+        headers={"X-API-Key": api_key},
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    assert ("HR_SENSITIVE_CONTENT", text) in entities
+    assert ("PHONE_NUMBER", "0912345678") in entities
 
 
 def test_deep_scan_failure_falls_back_to_regex_results(client, api_key, monkeypatch):

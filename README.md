@@ -20,7 +20,7 @@ built and tuned against real documents, not synthetic examples alone — see
 Known Limitations for what's still imperfect and why, and the "Why it's
 built this way" sections below for what was tried and rejected along the way.
 
-Status: **working local MVP** — 55/55 automated tests passing, tested end to
+Status: **working local MVP** — 56/56 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls) and inside a built Docker
 image. Scoped to local use, not deployed publicly.
 
@@ -429,6 +429,24 @@ follow-up once actual usage is observed).
   documented limitation, since fixing this on that path specifically was
   the part that turned out not to have a safe answer.
 
+  First version of this shipped with both results visible when
+  `deep_scan=true`: the correct full `ORGANIZATION` from deep scan *and*
+  the free path's wrong/truncated `LOCATION` for the same real company,
+  side by side — redundant, not wrong, but pointed out as worth cleaning
+  up. `_drop_regex_ner_entities_overlapped_by_deep_scan()` in
+  `app/scanning.py` now drops the free-path entity when deep scan finds an
+  overlapping `ORGANIZATION`/`PERSON`/`LOCATION` result — span *overlap*,
+  not the exact-span dedup used elsewhere in this file
+  (`_drop_lower_scored_exact_duplicates`), since the two spans genuinely
+  differ in width (underthesea's is a truncated substring of deep scan's
+  fuller one), not just in score. Deliberately scoped to just those three
+  types: `HR_SENSITIVE_CONTENT`/`IP_TRADE_SECRET_CONTENT` flag a whole
+  sentence and routinely overlap a `PHONE_NUMBER` or similar mentioned
+  inside it — a genuinely separate finding, not a competing interpretation
+  of the same value — so those two categories never trigger this drop,
+  verified with a test where a `PHONE_NUMBER` nested inside an
+  `HR_SENSITIVE_CONTENT` span survives untouched.
+
   Sixth round, found by testing a two-column-layout document (a realistic
   "hard" scenario, requested explicitly instead of more synthetic
   corruption tests) — this turned out to explain the `"Tên\nNguyễn Xuân
@@ -707,7 +725,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                55 tests total: detection (positive/negative/ambiguous),
+tests/                56 tests total: detection (positive/negative/ambiguous),
                       file-upload, OCR fallback, deep-scan (incl. retry),
                       VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
