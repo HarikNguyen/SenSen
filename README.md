@@ -11,7 +11,7 @@ mobile-number recognizer and a Vietnamese-aware NER (underthesea) replacing
 LLM pass adding 2 more categories regex fundamentally can't reach
 (trade-secret content, sensitive HR content).
 
-Status: **working local MVP** — 32/32 automated tests passing, tested end to
+Status: **working local MVP** — 34/34 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -297,17 +297,38 @@ follow-up once actual usage is observed).
   (`_looks_like_named_entity` in `app/vi_ner.py`) — real Vietnamese names and
   place names are always Title Case, headers/secrets/figures aren't; this
   dropped corpus-wide detections from 80 to 39 entities with the false
-  positives gone and the real names/places intact. Two known residual gaps,
-  documented rather than chased further: (1) a single capitalized
-  non-Vietnamese word can still slip through (e.g. "Backup"), rare and
-  low-severity; (2) some PDFs export Vietnamese text with the space glyph
-  missing between certain word pairs — confirmed via raw `pymupdf`
-  word-box inspection that the space is genuinely absent in the source
-  file, not an extraction bug — and the resulting glued token (e.g.
-  "Trợlý" for "Trợ lý") can still pass the Title Case filter as a false
-  positive. Also still true: underthesea's ORG/LOC boundary isn't always
-  reliable (a company name merged into a wrongly-tagged LOCATION span in
-  one test), so results carry a flat 0.6 score rather than a calibrated one.
+  positives gone and the real names/places intact.
+
+  Third round, found by re-running the exact real contract PDF that started
+  this fix: some PDFs drop the space glyph between certain word pairs at the
+  font/kerning level (confirmed via raw `pymupdf` word-box inspection — the
+  space is genuinely absent from the source file, not an extraction bug),
+  and a fused run like "Trợlý" or "Chếđộlàm" was opaque to underthesea's own
+  tokenizer, so it got swallowed as one token and tagged on capitalization
+  alone. `_expand_fused_words()` in `app/vi_ner.py` repairs this before
+  tagging: it DP-segments any non-dictionary token into known Vietnamese
+  syllables (frequencies reused from underthesea's own bundled
+  `Viet74K.txt`, no second dictionary shipped), only rewriting a token when
+  the DP finds *full* coverage — secrets, IDs and real foreign words are
+  left untouched since no full syllable coverage exists for them. Verified
+  against the same real PDF: recovers a full party name ("Trịnh SỹThành")
+  that was previously invisible entirely, and correctly bounds real
+  compound place names ("Phường Thủ Thiêm").
+
+  Known residual gaps, documented rather than chased further: (1) a single
+  capitalized non-Vietnamese word can still slip through (e.g. "Backup");
+  (2) underthesea sometimes assigns the wrong *type* even with the right
+  span — "Phường Thủ Thiêm" came back as PERSON instead of LOCATION, "Chủ
+  Nhật" (Sunday) as LOCATION instead of not-an-entity — a type-confusion
+  issue distinct from the segmentation one, consistent with the
+  already-known ORG/LOC unreliability below; (3) common single words that
+  are capitalized only because they start a sentence/bullet ("Được", "Xét",
+  "Cục") can still pass the Title Case filter — sentence-initial
+  capitalization looking like a proper noun is a generic, hard NER problem
+  in any language, not specific to this fix. Also still true: underthesea's
+  ORG/LOC boundary isn't always reliable (a company name merged into a
+  wrongly-tagged LOCATION span in one test), so results carry a flat 0.6
+  score rather than a calibrated one.
 - **No OCR.** Scanned/image PDFs raise a clear 422, not a silent failure.
   Deliberate: OCR is the CPU "sát thủ phần cứng" (hardware killer) to avoid
   on weak local hardware, and Azure AI Document Intelligence's free F0 tier
@@ -405,7 +426,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                32 tests total: detection (positive/negative/ambiguous),
+tests/                34 tests total: detection (positive/negative/ambiguous),
                       file-upload, deep-scan, VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)

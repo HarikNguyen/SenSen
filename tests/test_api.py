@@ -340,6 +340,31 @@ def test_vietnamese_ner_now_correct_instead_of_noisy(scan):
     assert not garbage, f"unexpected NER hits: {garbage}"
 
 
+def test_fused_word_no_longer_falsely_tagged(scan):
+    # Some PDF exports drop the space glyph between certain word pairs
+    # (verified via raw pymupdf word-box inspection on the real contract
+    # that surfaced this — genuinely absent from the source file, not an
+    # extraction bug). "Chếđộlàm" used to look like one Title Case word to
+    # the NER filter and get tagged PERSON/LOCATION; the DP syllable
+    # segmentation in app/vi_ner.py now splits it before tagging.
+    resp = scan("Điều 2: Chếđộlàm việc theo quy định công ty.", confidence_threshold=0.3)
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    noise = {(t, v) for t, v in entities if t in ("PERSON", "LOCATION", "ORGANIZATION")}
+    assert not noise, f"unexpected NER hits on a fused-word run: {noise}"
+
+
+def test_fused_name_recovered_via_syllable_segmentation(scan):
+    # The same fusion artifact glued a real party's name into "SỹThành" in
+    # the source contract — previously invisible to NER entirely. The
+    # syllable-segmentation repair recovers the full name.
+    resp = scan(
+        "Và một bên là Ông/Bà: Trịnh SỹThành Quốc tịch: Đài Loan.",
+        confidence_threshold=0.3,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    assert ("PERSON", "Trịnh SỹThành") in entities
+
+
 def test_vietnamese_ner_no_hallucination_on_fragment_only_text(scan):
     # No real person/org/location name anywhere in this sentence — any NER
     # hit here would be a genuine false positive, not a residual imprecision.
