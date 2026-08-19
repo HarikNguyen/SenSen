@@ -24,6 +24,7 @@ SEVERITY = {
     "FINANCIAL_CREDENTIAL": ("critical", 3),
     "US_SSN": ("critical", 3),
     "CREDIT_CARD": ("critical", 3),
+    "VN_NATIONAL_ID": ("critical", 3),
     "CONTRACT_ID": ("sensitive", 2),
     "INTERNAL_TAX_CODE": ("sensitive", 2),
     "FINANCIAL_METRIC": ("sensitive", 2),

@@ -32,6 +32,7 @@ CUSTOM_ENTITY_TYPES = {
     "INFRA_NETWORK_MAP",
     "GPS_LOCATION",
     "FINANCIAL_CREDENTIAL",
+    "VN_NATIONAL_ID",
 }
 
 SAMPLE_DOCS = [
@@ -49,6 +50,7 @@ SAMPLE_DOCS = [
     "Sơ đồ mạng nội bộ: gateway tại 10.20.5.1/24, subnet backup 192.168.1.0/24, firewall chặn ngoài VPC.",
     "Toạ độ GPS kho hàng: 21.038300, 105.782900 — cần bảo mật.",
     "Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2, chỉ kế toán trưởng được biết.",
+    "Ông Nguyễn Xuân Hùng, số CCCD 051195344431, làm việc tại Thành phố Hồ Chí Minh.",
 ]
 DOCS = SAMPLE_DOCS * 5  # 50 docs total — enough for a stable timing signal
 
@@ -88,7 +90,7 @@ def main():
 
     results = [
         run(baseline, "Vanilla Presidio (default recognizers only)"),
-        run(custom, "SenSen (default + 10 custom enterprise categories)"),
+        run(custom, "SenSen (default + 11 custom enterprise categories)"),
     ]
 
     lines = [
@@ -98,7 +100,7 @@ def main():
         f"repeated from {len(SAMPLE_DOCS)} templates). Same shared spaCy "
         f"`en_core_web_sm` NLP engine in both runs — only the recognizer set differs.",
         "",
-        "| Engine | Mean ms/doc | p95 ms/doc | Total entities | Custom-category hits (of 10 new types) |",
+        "| Engine | Mean ms/doc | p95 ms/doc | Total entities | Custom-category hits (of 11 new types) |",
         "|---|---|---|---|---|",
     ]
     for r in results:
@@ -118,15 +120,19 @@ def main():
     lines += [
         "## Reading this",
         "",
-        "- Latency difference between the two rows is the **cost of the 10 new "
+        "- Latency difference between the two rows is the **cost of the 11 new "
         "categories** (regex + context scoring) — expected to be small since "
-        "regex is C-engine and runs in milliseconds even on modest CPUs.",
+        "regex is C-engine and runs in milliseconds even on modest CPUs. Not "
+        "included in this cost: the VN phone/underthesea NER fixes, which "
+        "replace/extend *existing* PHONE_NUMBER/PERSON/ORG/LOCATION coverage "
+        "rather than adding new categories, so they don't show up as "
+        "'custom-category hits' below even though they're part of the same fix.",
         "- \"Custom-category hits\" is 0 for vanilla Presidio by construction: "
         "CONTRACT_ID, INTERNAL_TAX_CODE, FINANCIAL_METRIC, EMPLOYEE_ID, "
         "INFRA_SECRET, IP_SENSITIVE_MARKER, CRYPTO_PRIVATE_KEY, INFRA_NETWORK_MAP, "
-        "GPS_LOCATION and FINANCIAL_CREDENTIAL don't exist in stock Presidio at "
-        "all — this row quantifies the coverage gap these categories close, "
-        "not a tuning artifact.",
+        "GPS_LOCATION, FINANCIAL_CREDENTIAL and VN_NATIONAL_ID don't exist in "
+        "stock Presidio at all — this row quantifies the coverage gap these "
+        "categories close, not a tuning artifact.",
     ]
 
     report = "\n".join(lines)

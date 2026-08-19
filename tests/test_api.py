@@ -297,6 +297,59 @@ def test_deep_scan_quota_exceeded_after_cap(client, monkeypatch):
     assert resp.json()["deep_scan_status"] == "skipped_quota_exceeded"
 
 
+# ------------------------------------------ real-document findings fix ----
+# Found by scanning an actual filled-in contract PDF, not hypothetical.
+
+
+def test_vn_mobile_number_detected_as_phone(scan):
+    resp = scan("Điện thoại: 0932843132, liên hệ ngay.")
+    assert "PHONE_NUMBER" in entity_types(resp)
+
+
+def test_vn_national_id_context_outscores_bare_digits(scan):
+    with_ctx = scan("Số CCCD: 051195344431 cấp tại Hà Nội.", confidence_threshold=0.3)
+    without_ctx = scan("Mã đơn hàng: 051195344431 đã xử lý.", confidence_threshold=0.3)
+
+    ctx_scores = [
+        e["score"] for e in with_ctx.json()["detected_entities"] if e["entity_type"] == "VN_NATIONAL_ID"
+    ]
+    bare_scores = [
+        e["score"]
+        for e in without_ctx.json()["detected_entities"]
+        if e["entity_type"] == "VN_NATIONAL_ID"
+    ]
+    assert ctx_scores, "CCCD-shaped number with context should be detected"
+    assert not bare_scores or max(ctx_scores) > max(bare_scores)
+
+
+def test_vietnamese_ner_now_correct_instead_of_noisy(scan):
+    # Before: SpacyRecognizer (English NER) tagged this exact sentence shape
+    # with PERSON/ORGANIZATION/LOCATION garbage on fragments like "Ông/Bà".
+    # After: SpacyRecognizer disabled, underthesea (Vietnamese-aware) added —
+    # it correctly finds the real name and the real country, not fragments.
+    resp = scan(
+        "Một bên là Ông/Bà: Nguyễn Xuân Hùng, Quốc tịch: Việt Nam. Chức vụ: Giám đốc điều hành.",
+        confidence_threshold=0.3,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    assert ("PERSON", "Nguyễn Xuân Hùng") in entities
+    assert ("LOCATION", "Việt Nam") in entities
+    # Known residual imprecision, not hidden: fragments like "Ông/Bà" or
+    # "Chức vụ" must NOT also get tagged — only the real name/country.
+    garbage = {(t, v) for t, v in entities if v not in ("Nguyễn Xuân Hùng", "Việt Nam")}
+    assert not garbage, f"unexpected NER hits: {garbage}"
+
+
+def test_vietnamese_ner_no_hallucination_on_fragment_only_text(scan):
+    # No real person/org/location name anywhere in this sentence — any NER
+    # hit here would be a genuine false positive, not a residual imprecision.
+    resp = scan(
+        "Mọi thắc mắc vui lòng liên hệ trong giờ hành chính để được hỗ trợ.",
+        confidence_threshold=0.3,
+    )
+    assert not (entity_types(resp) & {"PERSON", "ORGANIZATION", "LOCATION"})
+
+
 def test_tax_code_context_outscores_bare_digits(scan):
     with_ctx = scan("Mã số thuế doanh nghiệp: 1234567890", confidence_threshold=0.2)
     without_ctx = scan("Random id: 1234567890", confidence_threshold=0.2)

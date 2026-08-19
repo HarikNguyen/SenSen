@@ -8,17 +8,38 @@ supported_languages:
 global_regex_flags: 26  # re.IGNORECASE (2) | re.MULTILINE (8) | re.DOTALL (16)
 
 recognizers:
-  # ---- NLP-based NER (PERSON/ORGANIZATION/DATE via spaCy) ----
+  # ---- NLP-based NER (PERSON/ORGANIZATION/DATE via spaCy) — DISABLED.
+  # en_core_web_sm has zero Vietnamese support: on real Vietnamese documents
+  # it tagged ordinary phrase fragments ("một bên", "Ông/Bà") as PERSON/ORG,
+  # and misclassified a real phone number and a national ID as DATE_TIME —
+  # 0% precision in practice, confirmed on a real scanned contract. Disabled
+  # rather than removed: an *absent* entry gets silently auto-re-added by
+  # Presidio when an nlp_engine is configured; `enabled: false` is what
+  # actually suppresses it. The nlp_engine itself keeps running regardless
+  # (tokens/lemmas still feed every other recognizer's context scoring) —
+  # this only stops the NER-sourced entities. See README roadmap for
+  # restoring PERSON/ORG detection via a Vietnamese-aware model.
   - name: SpacyRecognizer
     type: predefined
     supported_languages:
       - en
+    enabled: false
 
   # ---- Standard PII kept from Presidio's built-ins (curated subset, not the full list) ----
   - name: EmailRecognizer
     type: predefined
   - name: PhoneRecognizer
     type: predefined
+    # Kept for US/GB/etc-format numbers. Presidio's own default region list
+    # is (US, GB, DE, FR, IL, IN, CA, BR) — Vietnam isn't in it, so a bare
+    # "0932843132" was never checked against a VN-shaped pattern. Tried
+    # fixing via `supported_regions: [VN]` here first — doesn't work:
+    # PhoneRecognizer has no dedicated Pydantic config with `extra="allow"`
+    # (only HuggingFace/GLiNER/LangExtract recognizers do, see
+    # input_validation/yaml_recognizer_models.py), so YAML validation
+    # silently drops any constructor kwarg PhoneRecognizer's base config
+    # doesn't already declare. VN numbers are covered by the dedicated
+    # recognizer below instead.
   - name: UrlRecognizer
     type: predefined
   - name: IpRecognizer
@@ -269,3 +290,49 @@ recognizers:
       - "banking"
       - "account"
       - "card"
+
+  # J. Vietnamese national ID (CCCD, current 12-digit format per Thông tư
+  # 07/2016/TT-BCA): 3-digit province code + 1 digit encoding century/gender
+  # (0/1 = born 1900s male/female, 2/3 = born 2000s) + 2-digit birth year +
+  # 6 random digits. The [0-3] constraint is real structure, not a guess —
+  # it's what rules out most random 12-digit strings. Old 9-digit CMND
+  # format is out of scope (current format only).
+  - name: Vietnam National ID Recognizer
+    supported_language: "en"
+    supported_entity: "VN_NATIONAL_ID"
+    patterns:
+      - name: "CCCD 12-digit (century/gender digit constrained)"
+        regex: "\\b\\d{3}[0-3]\\d{8}\\b"
+        score: 0.4
+    context:
+      - "căn"
+      - "cước"
+      - "cccd"
+      - "cmnd"
+      - "cmtnd"
+      - "định"
+      - "danh"
+
+  # K. Vietnamese phone number — mobile numbering plan: leading 0 (local) or
+  # +84/0084 (international), then one of the 5 real mobile prefixes
+  # (3/5/7/8/9), then 8 more digits = 9 significant digits either way. Emits
+  # the standard PHONE_NUMBER entity (not a VN-specific type) since it's
+  # still fundamentally a phone number, just detected via a VN-specific
+  # pattern instead of Presidio's built-in PhoneRecognizer above.
+  - name: Vietnam Phone Recognizer
+    supported_language: "en"
+    supported_entity: "PHONE_NUMBER"
+    patterns:
+      - name: "VN mobile, local format (0 + prefix + 8 digits)"
+        regex: "\\b0[35789]\\d{8}\\b"
+        score: 0.75
+      - name: "VN mobile, international format (+84/0084 + prefix + 8 digits)"
+        regex: "(?:\\+84|0084)[35789]\\d{8}\\b"
+        score: 0.75
+    context:
+      - "điện"
+      - "thoại"
+      - "sđt"
+      - "phone"
+      - "mobile"
+      - "call"

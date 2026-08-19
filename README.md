@@ -1,14 +1,17 @@
 # SenSen — Sensitive Data Classifier
 
-A Presidio-powered API that finds standard PII *and* ten enterprise-specific
-sensitive-data categories (Legal, Financial, HR, Security/Infra, IP, plus a
-round-2 batch: crypto keys, network maps, GPS, financial credentials) in
-text, PDF and DOCX documents, scores confidence with context-aware
-validation, and can return an anonymized copy. An opt-in "deep scan" pass
-(LLM-based, see below) adds 2 more categories that regex fundamentally can't
-detect — trade-secret content and sensitive HR content.
+A Presidio-powered API that finds standard PII *and* eleven
+enterprise-specific sensitive-data categories (Legal, Financial, HR,
+Security/Infra, IP, crypto keys, network maps, GPS, financial credentials,
+VN national ID) in text, PDF and DOCX documents, scores confidence with
+context-aware validation, and can return an anonymized copy. Also includes
+Vietnam-specific fixes found by scanning a real document — a dedicated VN
+mobile-number recognizer and a Vietnamese-aware NER (underthesea) replacing
+`en_core_web_sm`'s zero-Vietnamese-support NER — and an opt-in "deep scan"
+LLM pass adding 2 more categories regex fundamentally can't reach
+(trade-secret content, sensitive HR content).
 
-Status: **working local MVP** — 28/28 automated tests passing, tested end to
+Status: **working local MVP** — 32/32 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -53,9 +56,12 @@ registry** (`RecognizerRegistryProvider` / `AnalyzerEngineProvider`) —
 confirmed against the installed package's own
 `presidio_analyzer/conf/{default_recognizers,example_recognizers}.yaml` and
 the [official docs](https://microsoft.github.io/presidio/analyzer/recognizer_registry_provider/).
-**All 10 custom categories live entirely in `app/recognizers/recognizers.yaml`
-— no app code changed when the second batch of 4 was added, and none will
-change for the next one either.** See "Adding a new category" below.
+**All 11 pattern-based categories live entirely in
+`app/recognizers/recognizers.yaml`** — no app code changed for rounds 2 or 3
+of these. That's specifically true for *regex* categories; non-pattern
+integrations (the LLM-based deep scan, the underthesea Vietnamese NER) are
+real Python modules by necessity, not a YAML block — see "Adding a new
+category" below for where the line is.
 
 ### Why Azure Container Apps instead of App Service
 
@@ -89,8 +95,8 @@ the real free options; see `Deployment` below.
 URL, IP, credit card, IBAN, crypto, MAC address, US SSN) instead of loading
 Presidio's full default set (50+ recognizers, many country-specific: UK NINO,
 IN Aadhaar, KR RRN...). Benchmarked side by side in `scripts/benchmark.py` —
-the curated set is actually **faster** (16.8ms vs 23.7ms mean/doc) despite
-adding 10 custom categories, purely from evaluating fewer irrelevant regexes
+the curated set is actually **faster** (21.78ms vs 26.91ms mean/doc) despite
+adding 11 custom categories, purely from evaluating fewer irrelevant regexes
 per request. Run it yourself: `python scripts/benchmark.py` (writes
 `BENCHMARK.md`).
 
@@ -138,7 +144,7 @@ flat entity dump — turns single-document scanning into a corpus-wide audit.
 See `ASSESSMENT_REPORT.md` for a real run against the 8 synthetic documents
 in `sample_corpus/` (all fake data, safe to commit).
 
-## The 10 custom categories
+## The 11 custom categories
 
 | Category | entity_type | Signal |
 |---|---|---|
@@ -159,6 +165,22 @@ classification):
 | G. Internal network map | `INFRA_NETWORK_MAP` | RFC1918 private IPv4 ranges + any CIDR notation (`10.20.5.1/24`) — distinct from Presidio's built-in `IpRecognizer`, which only matches single IPs |
 | H. GPS coordinates | `GPS_LOCATION` | Decimal lat/long pairs — deliberately weak base score (0.25), leans on context almost entirely, same design as `INTERNAL_TAX_CODE` |
 | I. Financial credential | `FINANCIAL_CREDENTIAL` | PIN/OTP/password *assignment* boosted by banking context — not the account number alone (same collision risk as phone-vs-tax-code, deliberately avoided) |
+
+Round 3 (added while fixing findings from scanning a real document — see
+"Known limitations" below for the full story):
+
+| Category | entity_type | Signal |
+|---|---|---|
+| J. VN national ID | `VN_NATIONAL_ID` | Current 12-digit CCCD format (Thông tư 07/2016/TT-BCA): province code + century/gender digit constrained to `[0-3]` + birth year + random digits — a real structural rule, not a guess |
+
+Two more fixes from that same pass aren't new *categories* — they add VN
+coverage to entity types Presidio already had: a dedicated Vietnam Phone
+Recognizer (mobile numbering plan: `0`/`+84` + prefix `[35789]` + 8 digits)
+now emits the standard `PHONE_NUMBER` alongside the built-in
+`PhoneRecognizer` (which only ships with US/GB/DE/FR/IL/IN/CA/BR by
+default), and `app/vi_ner.py` (underthesea) now emits `PERSON`/
+`ORGANIZATION`/`LOCATION` in place of the disabled `SpacyRecognizer` — see
+"Deep scan" section's sibling, right below "Known limitations".
 
 ### Adding a new category (no code changes)
 
@@ -260,13 +282,32 @@ follow-up once actual usage is observed).
 
 ## Known limitations (read before demoing)
 
-- **Vietnamese NER is weak.** `en_core_web_sm` is English-only; on Vietnamese
-  text it mislabels ordinary words as PERSON/ORGANIZATION/DATE_TIME (verified
-  empirically — see the false positives in a raw scan of Vietnamese text).
-  The 10 custom categories are regex/context-based so they're mostly
-  unaffected, but generic NER entities will be noisy on Vietnamese input.
-  Fix requires a Vietnamese-aware model (`vi_spacy` or `underthesea`) — sized
-  as a roadmap item, not day-1 scope, to protect the build timeline.
+- **Vietnamese NER has known residual imprecision (not perfect, but no
+  longer garbage).** `en_core_web_sm`'s `SpacyRecognizer` is disabled
+  (`enabled: false` in `recognizers.yaml`) — on a real scanned contract it
+  tagged ordinary phrase fragments ("một bên", "Ông/Bà") as PERSON/ORG and
+  misclassified a real phone number and national ID as DATE_TIME, 0%
+  precision in that test. `app/vi_ner.py` (underthesea) replaces it for
+  PERSON/ORGANIZATION/LOCATION — ~109MB RAM (comparable to en_core_web_sm),
+  no network call. First pass had its own noise problem, found by running it
+  over the whole `sample_corpus/` (not just a clean sentence): underthesea's
+  model reads ALL-CAPS headers, secret/key blobs and financial figures as
+  strong entity signals, so section titles and RSA key markers came back
+  tagged PERSON/LOCATION. Fixed with a Title Case + no-digits filter
+  (`_looks_like_named_entity` in `app/vi_ner.py`) — real Vietnamese names and
+  place names are always Title Case, headers/secrets/figures aren't; this
+  dropped corpus-wide detections from 80 to 39 entities with the false
+  positives gone and the real names/places intact. Two known residual gaps,
+  documented rather than chased further: (1) a single capitalized
+  non-Vietnamese word can still slip through (e.g. "Backup"), rare and
+  low-severity; (2) some PDFs export Vietnamese text with the space glyph
+  missing between certain word pairs — confirmed via raw `pymupdf`
+  word-box inspection that the space is genuinely absent in the source
+  file, not an extraction bug — and the resulting glued token (e.g.
+  "Trợlý" for "Trợ lý") can still pass the Title Case filter as a false
+  positive. Also still true: underthesea's ORG/LOC boundary isn't always
+  reliable (a company name merged into a wrongly-tagged LOCATION span in
+  one test), so results carry a flat 0.6 score rather than a calibrated one.
 - **No OCR.** Scanned/image PDFs raise a clear 422, not a silent failure.
   Deliberate: OCR is the CPU "sát thủ phần cứng" (hardware killer) to avoid
   on weak local hardware, and Azure AI Document Intelligence's free F0 tier
@@ -289,19 +330,21 @@ follow-up once actual usage is observed).
    Free F0 tier confirmed working but capped at 2 pages/doc — fine for a demo,
    needs paid S0 for real contracts. Needs your Azure key to build and test;
    not stubbed in this repo to avoid shipping untested cloud-integration code.
-2. **Vietnamese NLP**: `vi_spacy` (spaCy-compatible, least glue code to plug
-   into Presidio's existing `NlpEngine` interface) or `underthesea`.
-3. **Render.com fallback deploy** if Azure setup friction blocks a demo
+2. **Render.com fallback deploy** if Azure setup friction blocks a demo
    deadline — free tier confirmed live (512MB RAM/0.1 CPU, 750 hrs/mo, ~15min
    inactivity sleep). Tighter on RAM than Container Apps but zero Azure setup.
-4. **LLM confidence validator** — a different use of the same `langextract`/
+3. **LLM confidence validator** — a different use of the same `langextract`/
    Gemini pipeline already built for deep scan: re-score *existing*
    regex-based hits that land in the ambiguous 0.4–0.7 confidence band,
    instead of discovering new entity types. Not built yet — the deep-scan
    integration (see above) covers the new-category use case first.
-5. **Real daily-rolling deep-scan quota** — the current `MAX_DEEP_SCAN_PER_KEY`
+4. **Real daily-rolling deep-scan quota** — the current `MAX_DEEP_SCAN_PER_KEY`
    cap in `app/pages.py` is a simple lifetime counter; a proper daily reset
    is worth building once actual usage patterns are observed.
+5. **Underthesea's ORG/LOC boundary confusion** — tighten `app/vi_ner.py`
+   once more real-document examples are gathered (e.g. a heuristic for
+   company-name suffixes like "Công ty TNHH" that keep getting merged into
+   LOCATION spans instead of ORGANIZATION).
 
 ## Deployment (Azure Container Apps)
 
@@ -354,6 +397,7 @@ app/
   engine.py           Presidio construction (spaCy + recognizer registry)
   scanning.py         Core scan logic: analyze -> entities -> optional anonymize
   deep_scan.py        Opt-in LLM pass (langextract + Gemini) for semantic-only categories
+  vi_ner.py           Vietnamese-aware NER (underthesea) — replaces disabled SpacyRecognizer
   auth.py             X-API-Key verification dependency
   database.py         SQLAlchemy models: User, APIKey
   schemas.py          Pydantic request/response contracts
@@ -361,9 +405,10 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                25 detection tests (positive/negative/ambiguous) + 3 file-upload tests + 4 deep-scan tests + auth
+tests/                32 tests total: detection (positive/negative/ambiguous),
+                      file-upload, deep-scan, VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
-sample_corpus/         8 synthetic (fake-data) documents exercising all 10 categories + txt/pdf/docx
+sample_corpus/         8 synthetic (fake-data) documents exercising the original 10 categories + txt/pdf/docx
 Dockerfile             Ready for Azure Container Apps / Render / any Docker host
 ```

@@ -12,6 +12,8 @@ from presidio_analyzer.nlp_engine import NlpEngine, NlpEngineProvider
 from presidio_analyzer.recognizer_registry import RecognizerRegistryProvider
 from presidio_anonymizer import AnonymizerEngine
 
+from app.vi_ner import VietnameseNerRecognizer
+
 RECOGNIZERS_CONF = Path(__file__).resolve().parent / "recognizers" / "recognizers.yaml"
 
 
@@ -32,6 +34,11 @@ def build_engines() -> tuple[AnalyzerEngine, AnonymizerEngine]:
     registry = RecognizerRegistryProvider(
         conf_file=str(RECOGNIZERS_CONF), nlp_engine=nlp_engine
     ).create_recognizer_registry()
+
+    # Not YAML-declarable (not a regex/pattern recognizer) — registered here
+    # instead. Replaces SpacyRecognizer's PERSON/ORGANIZATION/LOCATION role
+    # for Vietnamese content; SpacyRecognizer itself is disabled in the YAML.
+    registry.add_recognizer(VietnameseNerRecognizer())
 
     # Widened to 8/8 (Presidio default: 5, prefix-only) — Vietnamese phrasing
     # often puts several filler words between a label and its value.
