@@ -11,7 +11,7 @@ mobile-number recognizer and a Vietnamese-aware NER (underthesea) replacing
 LLM pass adding 2 more categories regex fundamentally can't reach
 (trade-secret content, sensitive HR content).
 
-Status: **working local MVP** — 34/34 automated tests passing, tested end to
+Status: **working local MVP** — 38/38 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -237,8 +237,9 @@ few-shot extraction with built-in source-grounding — it maps each extraction
 back to an exact character span, which is the hard part of turning LLM
 output into a `DetectedEntity`). It is **not** wired in as a normal Presidio
 recognizer, because Presidio runs every recognizer in the registry on every
-`/api/v1/scan` call, and Gemini's free tier (~15 RPM / ~1,000-1,500 RPD, no
-card required) would be exhausted almost immediately under real traffic.
+`/api/v1/scan` call, and Gemini's free tier would be exhausted almost
+immediately under real traffic (see quota note below — the exact numbers
+move fast and shouldn't be trusted from a README).
 
 Instead, `app/deep_scan.py` is called only when the caller explicitly opts
 in:
@@ -246,7 +247,7 @@ in:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/scan \
   -H "Content-Type: application/json" -H "X-API-Key: <your_key>" \
-  -d '{"text": "...", "deep_scan": true}'
+  -d '{"text": "...", "deep_scan": true, "model": "gemini-3.7-flash"}'
 ```
 
 Requires the `LANGEXTRACT_API_KEY` env var (this exact name — it's what the
@@ -254,9 +255,28 @@ library itself reads; get a key at
 [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey), no
 card needed). Without it, `deep_scan: true` doesn't error — the response
 just carries `"deep_scan_status": "skipped_no_key"` and regex-only results,
-same as any other failure mode (network error, quota exhausted) collapses to
-`"skipped_error"`. `deep_scan` omitted or `false` never touches this code
-path at all — zero behavior change for existing clients.
+same as any other failure mode (network error, quota exhausted, or an
+unusable `model` override) collapses to `"skipped_error"`. `deep_scan`
+omitted or `false` never touches this code path at all — zero behavior
+change for existing clients.
+
+**`model` is optional** and picks the Gemini model for that one call;
+omitted, it falls back to `DEFAULT_MODEL_ID` in `app/deep_scan.py`
+(currently `gemini-flash-lite-latest` — a "-latest" alias, not a pinned
+version, on purpose: the previously pinned `gemini-2.5-flash-lite` was still
+callable but had already fallen off Google AI Studio's visible free-tier
+quota page within months, which is what prompted this — a moving target
+isn't solvable by picking a better fixed string, only by not pinning one for
+the default). `GET /api/v1/deep_scan/models` lists what your key can
+actually use right now (`{"status", "default_model", "models"}`, same
+`status` vocabulary as `deep_scan_status`) — **live-queried against the
+Gemini API, not a hardcoded list**, for the same reason: a static list here
+would just go stale the same way. Filtered server-side
+(`_is_usable_text_model` in `app/deep_scan.py`) down to plain Gemini
+text-in/text-out models — image/TTS/robotics/computer-use variants that
+share the `gemini-` prefix are excluded since they don't fit this
+extraction use case. The demo console (`static/index.html`) calls this
+endpoint to populate a dropdown when its "Deep scan" checkbox is ticked.
 
 Pilot categories (`app/deep_scan.py`'s `EXAMPLES`, extend by adding more
 few-shot examples — no other code changes needed, same story as
@@ -426,7 +446,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                34 tests total: detection (positive/negative/ambiguous),
+tests/                38 tests total: detection (positive/negative/ambiguous),
                       file-upload, deep-scan, VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)

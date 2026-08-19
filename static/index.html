@@ -49,7 +49,7 @@
   }
   .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-  input[type=text], textarea {
+  input[type=text], textarea, select {
     width: 100%;
     background: #0d0f15;
     border: 1px solid var(--border);
@@ -131,6 +131,12 @@ Database connection string: postgresql://admin:S3cretPass@db.internal:5432/prod
     <div class="row row-inline">
       <button id="scanBtn">Quét dữ liệu nhạy cảm</button>
       <label class="checkbox-row"><input type="checkbox" id="anonymize"> Ẩn danh hoá (anonymize)</label>
+      <label class="checkbox-row"><input type="checkbox" id="deepScan"> Deep scan (LLM)</label>
+    </div>
+    <div class="row" id="deepScanModelRow" style="display:none">
+      <label for="deepScanModel">Model (deep scan)</label>
+      <select id="deepScanModel"><option value="">— server default —</option></select>
+      <div id="deepScanModelStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
     </div>
     <div id="status"></div>
   </section>
@@ -147,6 +153,45 @@ Database connection string: postgresql://admin:S3cretPass@db.internal:5432/prod
 const scanBtn = document.getElementById('scanBtn');
 const statusEl = document.getElementById('status');
 const resultArea = document.getElementById('resultArea');
+const deepScanEl = document.getElementById('deepScan');
+const deepScanModelRow = document.getElementById('deepScanModelRow');
+const deepScanModelEl = document.getElementById('deepScanModel');
+const deepScanModelStatusEl = document.getElementById('deepScanModelStatus');
+
+let modelsLoadedForKey = null;
+
+async function loadDeepScanModels() {
+  const apiKey = document.getElementById('apiKey').value;
+  if (!apiKey || modelsLoadedForKey === apiKey) return;
+  deepScanModelStatusEl.textContent = 'Đang tải danh sách model...';
+  try {
+    const res = await fetch('/api/v1/deep_scan/models', { headers: { 'X-API-Key': apiKey } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    while (deepScanModelEl.options.length > 1) deepScanModelEl.remove(1);
+    for (const m of data.models) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m === data.default_model ? `${m} (mặc định)` : m;
+      deepScanModelEl.appendChild(opt);
+    }
+    modelsLoadedForKey = apiKey;
+    if (data.status === 'skipped_no_key') {
+      deepScanModelStatusEl.textContent = 'Server chưa cấu hình LANGEXTRACT_API_KEY — deep scan sẽ báo skipped_no_key.';
+    } else if (data.status === 'skipped_error') {
+      deepScanModelStatusEl.textContent = 'Không lấy được danh sách model từ Gemini — vẫn có thể dùng server default.';
+    } else {
+      deepScanModelStatusEl.textContent = `${data.models.length} model khả dụng · mặc định: ${data.default_model}`;
+    }
+  } catch (err) {
+    deepScanModelStatusEl.textContent = 'Lỗi tải danh sách model: ' + err.message;
+  }
+}
+
+deepScanEl.addEventListener('change', () => {
+  deepScanModelRow.style.display = deepScanEl.checked ? 'block' : 'none';
+  if (deepScanEl.checked) loadDeepScanModels();
+});
 
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -186,6 +231,8 @@ scanBtn.addEventListener('click', async () => {
   const text = document.getElementById('inputText').value;
   const apiKey = document.getElementById('apiKey').value;
   const anonymize = document.getElementById('anonymize').checked;
+  const deepScan = deepScanEl.checked;
+  const model = deepScanModelEl.value || undefined;
   statusEl.textContent = '';
   statusEl.className = '';
 
@@ -208,14 +255,16 @@ scanBtn.addEventListener('click', async () => {
     const res = await fetch('/api/v1/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-      body: JSON.stringify({ text, anonymize })
+      body: JSON.stringify({ text, anonymize, deep_scan: deepScan, model })
     });
     const data = await res.json();
     if (!res.ok) {
       throw new Error(data.detail || `HTTP ${res.status}`);
     }
     const ms = Math.round(performance.now() - t0);
-    statusEl.textContent = `Xong trong ${ms}ms · ${data.detected_entities.length} thực thể phát hiện.`;
+    let statusMsg = `Xong trong ${ms}ms · ${data.detected_entities.length} thực thể phát hiện.`;
+    if (data.deep_scan_status) statusMsg += ` · deep_scan: ${data.deep_scan_status}`;
+    statusEl.textContent = statusMsg;
 
     let html = `<div id="highlighted">${renderHighlighted(text, data.detected_entities)}</div>`;
     html += renderTable(data.detected_entities);

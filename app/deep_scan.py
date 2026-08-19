@@ -18,18 +18,31 @@ code changes needed — same story as app/recognizers/recognizers.yaml):
 
 import logging
 import os
+from typing import Optional
 
 import langextract as lx
+from google import genai
 
 from app.schemas import DetectedEntity, EntityLocation
 
 logger = logging.getLogger("sensen.deep_scan")
 
-# The library's own default (lx.extract's model_id default) is plain
-# "gemini-3.5-flash", which is NOT the free-tier-friendly choice — Flash-Lite
-# has materially more headroom. Verify this exact string against Google AI
-# Studio's current model list at setup time; model ids shift between releases.
-MODEL_ID = "gemini-2.5-flash-lite"
+# "-latest" aliases track whichever model Google currently designates as
+# standard, so the default doesn't go stale the way a pinned version does —
+# found the hard way: the previously pinned "gemini-2.5-flash-lite" was
+# still callable, but Google AI Studio had already moved the visible
+# free-tier quota UI on to newer models by the time this was checked
+# (2026-08-19). Flash-Lite over plain Flash for the same reason as before:
+# more free-tier headroom for a background/opt-in pass like this.
+DEFAULT_MODEL_ID = "gemini-flash-lite-latest"
+
+# Coarse allowlist for the ?model= override (see list_available_models() and
+# GET /api/v1/deep_scan/models): only plain-text Gemini models, not image/
+# audio/tooling variants that exist under the same "gemini-" prefix but
+# don't fit langextract's text-in/text-out extraction use case.
+_EXCLUDED_MODEL_SUBSTRINGS = (
+    "image", "tts", "robotics", "computer-use", "customtools", "omni",
+)
 
 # LangExtract doesn't produce a Presidio-style calibrated confidence score;
 # this is a fixed placeholder until real precision/recall data justifies
@@ -113,25 +126,71 @@ EXAMPLES = [
 ]
 
 
-def run_deep_scan(text: str) -> tuple[list[DetectedEntity], str]:
-    """Run the LLM extraction pass. Never raises.
+def _is_usable_text_model(name: str) -> bool:
+    if not name.startswith("gemini-"):
+        return False
+    if not ("flash" in name or "pro" in name):
+        return False
+    return not any(bad in name for bad in _EXCLUDED_MODEL_SUBSTRINGS)
 
-    Returns (entities, status) where status is one of "ok" (call succeeded,
-    entities may still be empty if nothing was found), "skipped_no_key", or
-    "skipped_error" — the caller needs this distinction to report an honest
-    deep_scan_status, since an empty entity list alone can't tell "nothing
-    found" apart from "the call never happened".
+
+def list_available_models() -> tuple[list[str], str]:
+    """List Gemini text-extraction-capable model ids callable with the
+    server's key, for the /api/v1/deep_scan/models endpoint. Never raises —
+    same (result, status) contract as run_deep_scan, reusing the same status
+    vocabulary ("ok" / "skipped_no_key" / "skipped_error").
+
+    Live-queried rather than a hardcoded list on purpose: found firsthand
+    while building this that pinned model ids go stale within months (see
+    DEFAULT_MODEL_ID above) — a static list here would just repeat that.
     """
     api_key = os.getenv("LANGEXTRACT_API_KEY")
     if not api_key:
         return [], "skipped_no_key"
 
     try:
+        client = genai.Client(api_key=api_key)
+        names = set()
+        for m in client.models.list():
+            if "generateContent" not in (m.supported_actions or []):
+                continue
+            name = m.name.removeprefix("models/")
+            if _is_usable_text_model(name):
+                names.add(name)
+    except Exception:
+        logger.warning("deep_scan: model listing failed", exc_info=True)
+        return [], "skipped_error"
+
+    return sorted(names), "ok"
+
+
+def run_deep_scan(text: str, model_id: Optional[str] = None) -> tuple[list[DetectedEntity], str]:
+    """Run the LLM extraction pass. Never raises.
+
+    Returns (entities, status) where status is one of "ok" (call succeeded,
+    entities may still be empty if nothing was found), "skipped_no_key", or
+    "skipped_error" — the caller needs this distinction to report an honest
+    deep_scan_status, since an empty entity list alone can't tell "nothing
+    found" apart from "the call never happened". `model_id` defaults to
+    DEFAULT_MODEL_ID; an explicit override that isn't a recognized plain-text
+    Gemini model (see _is_usable_text_model) is rejected as "skipped_error"
+    before spending an API call.
+    """
+    api_key = os.getenv("LANGEXTRACT_API_KEY")
+    if not api_key:
+        return [], "skipped_no_key"
+
+    model_id = model_id or DEFAULT_MODEL_ID
+    if not _is_usable_text_model(model_id):
+        logger.warning("deep_scan: rejected unusable model override %r", model_id)
+        return [], "skipped_error"
+
+    try:
         result = lx.extract(
             text_or_documents=text,
             prompt_description=PROMPT_DESCRIPTION,
             examples=EXAMPLES,
-            model_id=MODEL_ID,
+            model_id=model_id,
             api_key=api_key,
             show_progress=False,
         )

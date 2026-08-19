@@ -233,7 +233,7 @@ def test_financial_credential_with_banking_context_outscores_bare(scan):
 
 
 def test_deep_scan_off_by_default_never_calls_langextract(client, api_key, monkeypatch):
-    def _boom(text):
+    def _boom(text, model_id=None):
         raise AssertionError("run_deep_scan must not run when deep_scan is unset")
 
     monkeypatch.setattr("app.scanning.run_deep_scan", _boom)
@@ -243,7 +243,7 @@ def test_deep_scan_off_by_default_never_calls_langextract(client, api_key, monke
 
 
 def test_deep_scan_merges_successful_extraction(client, api_key, monkeypatch):
-    def _fake(text):
+    def _fake(text, model_id=None):
         entity = DetectedEntity(
             entity_type="HR_SENSITIVE_CONTENT",
             location=EntityLocation(start=0, end=5),
@@ -265,7 +265,7 @@ def test_deep_scan_merges_successful_extraction(client, api_key, monkeypatch):
 
 
 def test_deep_scan_failure_falls_back_to_regex_results(client, api_key, monkeypatch):
-    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text: ([], "skipped_error"))
+    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text, model_id=None: ([], "skipped_error"))
     resp = client.post(
         "/api/v1/scan",
         json={"text": "Contact test@example.com", "deep_scan": True},
@@ -280,7 +280,7 @@ def test_deep_scan_failure_falls_back_to_regex_results(client, api_key, monkeypa
 def test_deep_scan_quota_exceeded_after_cap(client, monkeypatch):
     from app.pages import MAX_DEEP_SCAN_PER_KEY
 
-    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text: ([], "ok"))
+    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text, model_id=None: ([], "ok"))
 
     email = f"quota-{uuid.uuid4().hex[:8]}@sensen.dev"
     key = client.post("/register", json={"email": email}).json()["api_key"]
@@ -295,6 +295,48 @@ def test_deep_scan_quota_exceeded_after_cap(client, monkeypatch):
         "/api/v1/scan", json={"text": "hello", "deep_scan": True}, headers={"X-API-Key": key}
     )
     assert resp.json()["deep_scan_status"] == "skipped_quota_exceeded"
+
+
+def test_deep_scan_model_override_passed_through(client, api_key, monkeypatch):
+    captured = {}
+
+    def _fake(text, model_id=None):
+        captured["model_id"] = model_id
+        return [], "ok"
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _fake)
+    client.post(
+        "/api/v1/scan",
+        json={"text": "hello", "deep_scan": True, "model": "gemini-3.7-flash"},
+        headers={"X-API-Key": api_key},
+    )
+    assert captured["model_id"] == "gemini-3.7-flash"
+
+
+def test_deep_scan_rejects_unusable_model_override(monkeypatch):
+    # Validated before any network call — an image/tts/etc. model id under
+    # the same "gemini-" prefix is rejected without spending an API call.
+    from app.deep_scan import run_deep_scan
+
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key-for-validation-test")
+    entities, status = run_deep_scan("some text", model_id="gemini-3-pro-image")
+    assert status == "skipped_error"
+    assert entities == []
+
+
+def test_deep_scan_models_endpoint_reports_no_key(client, api_key, monkeypatch):
+    monkeypatch.delenv("LANGEXTRACT_API_KEY", raising=False)
+    resp = client.get("/api/v1/deep_scan/models", headers={"X-API-Key": api_key})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "skipped_no_key"
+    assert body["models"] == []
+    assert body["default_model"]
+
+
+def test_deep_scan_models_endpoint_requires_auth(client):
+    resp = client.get("/api/v1/deep_scan/models")
+    assert resp.status_code == 422  # missing required X-API-Key header
 
 
 # ------------------------------------------ real-document findings fix ----

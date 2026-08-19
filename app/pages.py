@@ -5,6 +5,7 @@ or app/scanning.py for the actual processing, and shapes the response.
 """
 
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -14,10 +15,17 @@ from sqlalchemy.orm import Session
 
 from app.auth import verify_api_key
 from app.database import APIKey, get_db
+from app.deep_scan import DEFAULT_MODEL_ID, list_available_models
 from app.extract import UnsupportedFileType, extract_text
 from app.logics import register_user
 from app.scanning import run_scan
-from app.schemas import RegisterRequest, RegisterResponse, ScanRequest, ScanResponse
+from app.schemas import (
+    DeepScanModelsResponse,
+    RegisterRequest,
+    RegisterResponse,
+    ScanRequest,
+    ScanResponse,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -59,6 +67,16 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     return RegisterResponse(email=user.email, api_key=api_key.key)
 
 
+@router.get("/api/v1/deep_scan/models", response_model=DeepScanModelsResponse)
+async def deep_scan_models(api_key: APIKey = Depends(verify_api_key)):
+    """List Gemini model ids the server's key can use for deep_scan's
+    `model` param. Live-queried, not behind the deep-scan quota — listing
+    models doesn't spend a generateContent call.
+    """
+    models, status = list_available_models()
+    return DeepScanModelsResponse(status=status, default_model=DEFAULT_MODEL_ID, models=models)
+
+
 @router.post("/api/v1/scan", response_model=ScanResponse)
 async def scan(
     payload: ScanRequest,
@@ -76,6 +94,7 @@ async def scan(
         analyzer,
         anonymizer,
         deep_scan=allowed,
+        deep_scan_model=payload.model,
     )
     if payload.deep_scan and not allowed:
         response.deep_scan_status = "skipped_quota_exceeded"
@@ -89,6 +108,7 @@ async def scan_file(
     confidence_threshold: float = Form(0.7),
     anonymize: bool = Form(False),
     deep_scan: bool = Form(False),
+    model: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     api_key: APIKey = Depends(verify_api_key),
     analyzer: AnalyzerEngine = Depends(get_analyzer),
@@ -114,6 +134,7 @@ async def scan_file(
         analyzer,
         anonymizer,
         deep_scan=allowed,
+        deep_scan_model=model,
         file_name=file.filename,
         file_type=file_type,
         processing_mode="direct_text_extraction",

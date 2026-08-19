@@ -35,6 +35,7 @@ def run_scan(
     anonymizer: AnonymizerEngine,
     *,
     deep_scan: bool = False,
+    deep_scan_model: Optional[str] = None,
     file_name: Optional[str] = None,
     file_type: str = "text",
     processing_mode: str = "direct_text_extraction",
@@ -74,7 +75,7 @@ def run_scan(
 
     deep_scan_status = None
     if deep_scan:
-        deep_entities, deep_scan_status = run_deep_scan(text)
+        deep_entities, deep_scan_status = run_deep_scan(text, model_id=deep_scan_model)
         entities.extend(deep_entities)
         entities.sort(key=lambda e: e.location.start)
         # Note: deep_entities are not passed through anonymizer.anonymize()

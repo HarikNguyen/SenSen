@@ -23,6 +23,13 @@ class ScanRequest(BaseModel):
         default=False,
         description="Also run an LLM-based pass for semantic-only categories (costs a Gemini call)",
     )
+    model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Gemini model id for deep_scan, e.g. from GET /api/v1/deep_scan/models. "
+            "Ignored unless deep_scan is true; omit to use the server default."
+        ),
+    )
 
 
 class EntityLocation(BaseModel):
@@ -62,3 +69,9 @@ class ScanResponse(BaseModel):
             "'ok', 'skipped_no_key', 'skipped_quota_exceeded', 'skipped_error'"
         ),
     )
+
+
+class DeepScanModelsResponse(BaseModel):
+    status: str = Field(description="'ok', 'skipped_no_key', or 'skipped_error' — same vocabulary as deep_scan_status")
+    default_model: str
+    models: list[str]
