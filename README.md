@@ -364,6 +364,21 @@ follow-up once actual usage is observed).
 - **`saas.db` is a local file**, fine for MVP/demo, not for concurrent
   production writers — swap the `DATABASE_URL` env var (`SENSEN_DATABASE_URL`)
   for Postgres when that matters.
+- **Deep scan fails intermittently, not deterministically — this is a real,
+  reproduced bug, not FUD.** Found by testing `sample_corpus/full_coverage_demo.txt`:
+  the exact same call (same text, model, key) returned `skipped_error` once
+  and `"ok"` with correct extractions on an immediate retry. Root cause is
+  inside `langextract` 1.6.0's Gemini provider — a pydantic `ValidationError`
+  building its `response_schema` ("Extra inputs are not permitted" on
+  `type`/`properties`/`required`), which looks like a schema-shape mismatch
+  against the installed `google-genai` 2.18.1. Both packages were already at
+  their latest release when this was found, so there's no version bump
+  available to fix it yet. `run_deep_scan`'s existing try/except already
+  degrades safely — `deep_scan_status: "skipped_error"`, regex results still
+  returned — so this doesn't break a scan, but a transient failure shouldn't
+  be read as "deep scan doesn't work" or "nothing sensitive here" without
+  checking the regex-side results too, which is exactly why `deep_scan_status`
+  is a separate field instead of silently folded into `detected_entities`.
 
 ## Roadmap (not built yet, sequenced by effort/value)
 
@@ -386,6 +401,11 @@ follow-up once actual usage is observed).
    once more real-document examples are gathered (e.g. a heuristic for
    company-name suffixes like "Công ty TNHH" that keep getting merged into
    LOCATION spans instead of ORGANIZATION).
+6. **Deep-scan intermittent `skipped_error`** (see Known limitations) — worth
+   a bounded retry-once wrapper in `run_deep_scan` if this turns out to be
+   common enough in practice to be worth the extra Gemini quota spend;
+   watching for a `langextract`/`google-genai` release that fixes the
+   underlying schema-validation bug is the other resolution path.
 
 ## Deployment (Azure Container Apps)
 
@@ -450,6 +470,8 @@ tests/                38 tests total: detection (positive/negative/ambiguous),
                       file-upload, deep-scan, VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
-sample_corpus/         8 synthetic (fake-data) documents exercising the original 10 categories + txt/pdf/docx
+sample_corpus/         9 synthetic (fake-data) documents; full_coverage_demo.txt hits all 22
+                      entity types (every custom category + all curated Presidio types +
+                      VN NER + both deep-scan categories) in one file for manual testing
 Dockerfile             Ready for Azure Container Apps / Render / any Docker host
 ```

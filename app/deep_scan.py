@@ -3,8 +3,9 @@
 The only module that imports langextract, mirroring how app/engine.py is the
 only one that imports presidio_analyzer. Never called automatically — only
 when a caller explicitly opts in (see app/scanning.py's deep_scan flag),
-because every call costs a Gemini free-tier request (~15 RPM / ~1-1.5k RPD,
-no card required, but easy to exhaust under real traffic).
+because every call costs a Gemini free-tier request, and free-tier RPM/RPD
+limits vary by model and change over time (see GET /api/v1/deep_scan/models
+and DEFAULT_MODEL_ID above — don't trust a number hardcoded in a comment).
 
 Pilot categories (extend by adding more ExampleData entries below, no other
 code changes needed — same story as app/recognizers/recognizers.yaml):
@@ -14,6 +15,23 @@ code changes needed — same story as app/recognizers/recognizers.yaml):
     unreleased specs.
   - HR_SENSITIVE_CONTENT: performance-review / disciplinary content, which
     has no regex-detectable shape at all.
+
+Known bug, found by testing against sample_corpus/full_coverage_demo.txt
+(not something app/deep_scan.py itself can fix): langextract 1.6.0's Gemini
+provider intermittently raises a pydantic ValidationError building its
+response_schema ("Extra inputs are not permitted" on type/properties/
+required) — looks like a version mismatch between langextract's schema
+construction and the installed google-genai SDK, and it's a race, not
+deterministic: the exact same call failed once then succeeded on immediate
+retry with the same text/model/key. `run_deep_scan`'s existing try/except
+already degrades safely (returns "skipped_error", caller falls back to
+regex-only results) — that behavior is correct as-is; not adding an
+automatic retry here since it would silently double Gemini quota spend on
+every occurrence without the caller asking for it. Both langextract (1.6.0)
+and google-genai (2.18.1) were already at their latest release when this was
+found (checked via `pip index versions`), so there's no upstream fix to pull
+in yet — this is a genuinely open bug in the pinned dependency, not
+something this codebase is behind on.
 """
 
 import logging

@@ -1,42 +1,51 @@
 # SenSen Assessment Report
 
-Corpus: `sample_corpus` — 8 documents scanned, confidence_threshold=0.5.
+Corpus: `sample_corpus` — 9 documents scanned, confidence_threshold=0.5.
 
 ## Summary
 
-- **39 entities detected** across the corpus
-- **6 critical** (live secrets/credentials — INFRA_SECRET, SSN, credit card)
-- **13 sensitive** (contract IDs, tax codes, financial figures, employee IDs)
+- **76 entities detected** across the corpus
+- **14 critical** (live secrets/credentials — INFRA_SECRET, SSN, credit card)
+- **20 sensitive** (contract IDs, tax codes, financial figures, employee IDs)
 - **0 flagged for review** (IP/confidentiality markers)
 
 ## Documents ranked by risk (review in this order)
 
 | Rank | Document | Type | Risk score | Critical | Sensitive | Review | Total entities |
 |---|---|---|---|---|---|---|---|
-| 1 | `devops_handover.txt` | text | 12 | 2 | 3 | 0 | 8 |
-| 2 | `infra_notes.txt` | text | 9 | 3 | 0 | 0 | 4 |
-| 3 | `finance_report.txt` | text | 8 | 0 | 4 | 0 | 5 |
-| 4 | `contract_001.txt` | text | 4 | 0 | 2 | 0 | 10 |
-| 5 | `employment_addendum.docx` | docx | 4 | 0 | 2 | 0 | 4 |
-| 6 | `hr_review_q3.txt` | text | 4 | 0 | 2 | 0 | 4 |
-| 7 | `tech_report.pdf` | pdf | 3 | 1 | 0 | 0 | 4 |
-| 8 | `meeting_notes.txt` | text | 0 | 0 | 0 | 0 | 0 |
+| 1 | `full_coverage_demo.txt` | text | 38 | 8 | 7 | 0 | 37 |
+| 2 | `devops_handover.txt` | text | 12 | 2 | 3 | 0 | 8 |
+| 3 | `infra_notes.txt` | text | 9 | 3 | 0 | 0 | 4 |
+| 4 | `finance_report.txt` | text | 8 | 0 | 4 | 0 | 5 |
+| 5 | `contract_001.txt` | text | 4 | 0 | 2 | 0 | 10 |
+| 6 | `employment_addendum.docx` | docx | 4 | 0 | 2 | 0 | 4 |
+| 7 | `hr_review_q3.txt` | text | 4 | 0 | 2 | 0 | 4 |
+| 8 | `tech_report.pdf` | pdf | 3 | 1 | 0 | 0 | 4 |
+| 9 | `meeting_notes.txt` | text | 0 | 0 | 0 | 0 | 0 |
 
 ## Entity type breakdown (whole corpus)
 
-- **FINANCIAL_METRIC**: 7 _sensitive_
-- **URL**: 7
-- **EMAIL_ADDRESS**: 5
-- **PERSON**: 4
-- **INFRA_SECRET**: 4 _critical_
-- **PHONE_NUMBER**: 2
-- **INFRA_NETWORK_MAP**: 2 _sensitive_
-- **IP_ADDRESS**: 2
-- **EMPLOYEE_ID**: 2 _sensitive_
-- **CONTRACT_ID**: 1 _sensitive_
-- **CRYPTO_PRIVATE_KEY**: 1 _critical_
-- **FINANCIAL_CREDENTIAL**: 1 _critical_
-- **GPS_LOCATION**: 1 _sensitive_
+- **URL**: 10
+- **FINANCIAL_METRIC**: 8 _sensitive_
+- **PERSON**: 8
+- **INFRA_SECRET**: 7 _critical_
+- **EMAIL_ADDRESS**: 6
+- **LOCATION**: 6
+- **IP_ADDRESS**: 5
+- **PHONE_NUMBER**: 4
+- **INFRA_NETWORK_MAP**: 4 _sensitive_
+- **EMPLOYEE_ID**: 3 _sensitive_
+- **CONTRACT_ID**: 2 _sensitive_
+- **CRYPTO_PRIVATE_KEY**: 2 _critical_
+- **FINANCIAL_CREDENTIAL**: 2 _critical_
+- **GPS_LOCATION**: 2 _sensitive_
+- **CREDIT_CARD**: 1 _critical_
+- **IBAN_CODE**: 1
+- **CRYPTO**: 1
+- **MAC_ADDRESS**: 1
+- **US_SSN**: 1 _critical_
+- **VN_NATIONAL_ID**: 1 _critical_
+- **INTERNAL_TAX_CODE**: 1 _sensitive_
 
 ## Reading this
 

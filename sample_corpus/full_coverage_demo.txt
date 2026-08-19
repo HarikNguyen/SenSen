@@ -1,0 +1,57 @@
+BÁO CÁO NỘI BỘ TỔNG HỢP — QUÝ 4/2026
+(Toàn bộ tên người, công ty, số liệu trong tài liệu này đều là dữ liệu giả
+định, dùng để kiểm thử hệ thống — không phải thông tin thật.)
+
+1. Thông tin hợp đồng & pháp lý
+Phụ lục hợp đồng số HD-2026-0555 ký giữa Công ty TNHH Thiên Phú và bà
+Nguyễn Thị Lan Anh, đại diện phòng Pháp chế. Tài liệu này được đánh dấu
+CONFIDENTIAL, không phổ biến ra ngoài phạm vi ban giám đốc.
+Bên vi phạm điều khoản bảo mật có thể phải bồi thường theo Bộ luật Lao động.
+
+2. Thông tin liên hệ & tài khoản
+Email liên hệ: lienhe@congtythienphu.vn
+Số điện thoại di động: 0987654321 (định dạng khác: +84912345678)
+Website nội bộ: https://portal.congtythienphu.vn/internal
+Số CCCD của trưởng phòng nhân sự: 079198123456, cấp tại Hà Nội.
+Mã số thuế doanh nghiệp: 1234567890, đăng ký tại Sở Kế hoạch Đầu tư TP.HCM.
+
+3. Tài chính
+Lợi nhuận quý này: 12.500.000.000 VND, tăng so với quý trước.
+Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2qR, chỉ kế toán trưởng
+được biết.
+Thẻ test dùng cho sandbox thanh toán: 4111 1111 1111 1111.
+IBAN đối tác quốc tế: DE89370400440532013000.
+Ví Bitcoin quỹ dự phòng: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.
+
+4. Nhân sự
+Mã nhân viên: NV-00789, họ tên: Trần Văn Bình, chức danh: Kỹ sư hạ tầng.
+Nhân viên Trần Văn Bình đã bị khiển trách bằng văn bản do vi phạm quy định
+bảo mật thông tin khách hàng 2 lần trong quý này, đang được đưa vào diện
+theo dõi kỷ luật.
+Chếđộlàm việc áp dụng theo quy định chung của công ty, 8 tiếng/ngày.
+
+5. Hạ tầng & bảo mật
+Database connection string: postgresql://svc_app:Passw0rd123@db-prod.internal:5432/main
+Internal API key: sk-live-51Hh8x9AbCdEfGhIjKlMnOpQrStUvWxYz01234567
+AWS access key: AKIAV5RJ9F2K7QZX3MNB
+Backup SSH key:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA1c7z9z5Pad7OejecsQ0bu3aumgIJemALQTOtNz/nq6IUvKtV
+-----END RSA PRIVATE KEY-----
+Sơ đồ mạng nội bộ: gateway chính tại 10.20.5.1/24, subnet dự phòng
+192.168.1.0/24. Máy chủ public test: 203.113.10.5.
+MAC address thiết bị mạng: 00:1A:2B:3C:4D:5E.
+SSN nhân viên nước ngoài (hồ sơ mẫu): 234-56-7890.
+
+6. Sở hữu trí tuệ
+Thuật toán định giá sản phẩm của công ty dùng trọng số 0.7 cho chi phí
+nguyên liệu và 0.3 cho biên lợi nhuận mục tiêu — công thức độc quyền chưa
+từng công bố ra bên ngoài.
+
+7. Kho vận
+Toạ độ kho hàng trung tâm: 21.038300, 105.782900, cần bảo mật, không public.
+Kho đặt tại Phường Thủ Thiêm, Thành phố Hồ Chí Minh, Việt Nam.
+
+8. Cuộc họp
+Người tham dự: ông Nguyễn Xuân Hùng (Giám đốc điều hành), bà Lê Thị Ngọc Hà
+(Trưởng phòng Tài chính), đại diện Công ty Cổ phần Đầu Tư Toàn Cầu.
