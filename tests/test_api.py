@@ -382,6 +382,39 @@ def test_vietnamese_ner_now_correct_instead_of_noisy(scan):
     assert not garbage, f"unexpected NER hits: {garbage}"
 
 
+def test_vietnamese_ner_score_is_graduated_not_flat(scan):
+    # app/vi_ner.py used to hard-filter (keep/reject) then assign every kept
+    # result a flat 0.6, silently ignoring confidence_threshold. Real
+    # multi-word entities should now score meaningfully high on their own,
+    # not just "whatever passed a binary gate".
+    resp = scan(
+        "Một bên là Ông/Bà: Nguyễn Xuân Hùng, Quốc tịch: Việt Nam.",
+        confidence_threshold=0.1,
+    )
+    scores = {
+        e["entity_type"]: e["score"]
+        for e in resp.json()["detected_entities"]
+        if e["entity_type"] in ("PERSON", "LOCATION")
+    }
+    assert scores["PERSON"] > 0.6
+    assert scores["LOCATION"] > 0.6
+
+
+def test_vietnamese_ner_bullet_initial_common_word_filtered_at_normal_threshold(scan):
+    # "Được"/"Xét" are common verbs capitalized only because they start a
+    # bulleted clause, not proper nouns. Real real-document finding (this
+    # exact shape came from a labor contract's benefits section). Should
+    # score low enough to disappear at a normal operating threshold, via
+    # graduated scoring rather than a hard-coded denylist.
+    resp = scan(
+        "- Được trả lương vào ngày 05 hàng tháng.\n- Xét nâng lương định kỳ 12 tháng/lần.",
+        confidence_threshold=0.5,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    noise = {(t, v) for t, v in entities if t in ("PERSON", "LOCATION", "ORGANIZATION")}
+    assert not noise, f"unexpected NER hits: {noise}"
+
+
 def test_fused_word_no_longer_falsely_tagged(scan):
     # Some PDF exports drop the space glyph between certain word pairs
     # (verified via raw pymupdf word-box inspection on the real contract

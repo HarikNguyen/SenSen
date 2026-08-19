@@ -52,12 +52,34 @@ resolved to anything NER would tag as PERSON), and correctly bounds real
 compound place names ("Phường Thủ Thiêm") that used to be split wrong.
 Residual, not fixed by this: underthesea sometimes assigns PERSON to a
 place name or LOCATION to a day-of-week ("Chủ Nhật") even with the right
-span boundaries — a type-confusion issue, not a segmentation one. Also
-residual: common single words that are capitalized only because they start
-a sentence/bullet ("Được", "Xét", "Cục") can still pass the Title Case
-filter — sentence-initial capitalization looking like a proper noun is a
-generic, hard NER problem, not specific to the fused-word fix, and not
-chased further here (see README known limitations).
+span boundaries — a type-confusion issue, not a segmentation one, and shape
+scoring below can't fix a type that's already wrong on a correctly-bounded
+span.
+
+Fourth round: single common words capitalized only by sentence/bullet
+position ("Được", "Xét", "Cục") used to pass the Title Case filter as a
+hard yes/no gate with every kept result getting a flat 0.6 — which also
+meant this recognizer, alone among every other one in this codebase,
+ignored the caller's confidence_threshold entirely: passed the shape check
+or didn't exist, nothing in between. Replaced with `_score_entity()`: same
+Title Case + no-digits shape check as a hard floor (headers/secrets/figures
+aren't ambiguous — they're just not names, score 0 and drop), but for
+what's left, a graduated score instead of a flat one, same idea as every
+regex category's strong/weak pattern split. Two signals, each weak alone
+but separating cleanly together (verified against every real/false-positive
+example gathered across this fix): multi-word spans (+0.15) since a real
+full name or place is almost always 2+ words; single-word spans where the
+word is itself a common dictionary entry (-0.25, reusing the syllable
+frequency table already loaded for word-fusion repair — checked as
+plain membership here, not the frequency value itself, since frequency
+alone doesn't separate common words from name syllables: "cục"=61 sits
+right next to real name syllables like "thủ"=143, "anh"=125); and
+sentence/bullet-initial position (-0.1), a cheap proxy for "capitalized
+because of where it sits, not what it is". Real entities land around 0.65,
+false positives around 0.15-0.40 — normal operating thresholds (0.5+, the
+API's own default is 0.7) see none of the noise; a caller who explicitly
+asks for a very low threshold sees marginal candidates too, which is what
+asking for a low threshold means everywhere else in this system.
 """
 
 import logging
@@ -75,7 +97,6 @@ from underthesea import ner as underthesea_ner
 
 logger = logging.getLogger("sensen.vi_ner")
 
-SCORE = 0.6
 TAG_TO_ENTITY = {
     "PER": "PERSON",
     "ORG": "ORGANIZATION",
@@ -83,6 +104,10 @@ TAG_TO_ENTITY = {
 }
 
 _STRIP_CHARS = string.punctuation + "—–“”\"'"
+# ":" deliberately excluded — "Label: Value" (e.g. "Ông/Bà: Nguyễn Xuân Hùng")
+# is the single most common place a real name appears in these documents, so
+# treating a colon as a sentence boundary penalized exactly the wrong cases.
+_SENTENCE_BOUNDARY_CHARS = ".-—–\n"
 
 # Reuses underthesea's own bundled word list as a syllable-frequency source
 # instead of shipping a second Vietnamese dictionary — see module docstring.
@@ -91,18 +116,38 @@ _MIN_SYLLABLE_LEN = 2  # excludes stray single-letter entries (not real VN sylla
 _MAX_SYLLABLE_LEN = 8  # longest real VN syllable with diacritics is well under this
 _TOKEN_RE = re.compile(r"\S+|\s+")
 
+_BASE_SCORE = 0.5
+_MULTI_WORD_BONUS = 0.15
+_SINGLE_WORD_COMMON_WORD_PENALTY = 0.25
+_SENTENCE_INITIAL_PENALTY = 0.1
 
-def _looks_like_named_entity(span_text: str) -> bool:
-    """Real Vietnamese names/places are Title Case with no digits; headers,
-    secrets and figures aren't. See module docstring for how this was derived.
+
+def _is_sentence_initial(text: str, start: int) -> bool:
+    prefix = text[:start].rstrip()
+    return not prefix or prefix[-1] in _SENTENCE_BOUNDARY_CHARS
+
+
+def _score_entity(span_text: str, sentence_initial: bool, freq: dict) -> float:
+    """Graduated confidence instead of a hard keep/reject gate, so this
+    recognizer respects the caller's confidence_threshold like every other
+    one in this codebase. See module docstring for how the two signals below
+    were chosen and verified.
     """
     if any(ch.isdigit() for ch in span_text):
-        return False
+        return 0.0
     words = [w.strip(_STRIP_CHARS) for w in span_text.split()]
     words = [w for w in words if w]
-    if not words:
-        return False
-    return all(len(w) >= 2 and w.istitle() for w in words)
+    if not words or not all(len(w) >= 2 and w.istitle() for w in words):
+        return 0.0  # not ambiguous: headers/secrets/figures aren't names at all
+
+    score = _BASE_SCORE
+    if len(words) >= 2:
+        score += _MULTI_WORD_BONUS
+    elif words[0].lower() in freq:
+        score -= _SINGLE_WORD_COMMON_WORD_PENALTY
+    if sentence_initial:
+        score -= _SENTENCE_INITIAL_PENALTY
+    return max(0.0, min(1.0, score))
 
 
 @lru_cache(maxsize=1)
@@ -260,19 +305,22 @@ class VietnameseNerRecognizer(EntityRecognizer):
             logger.warning("vi_ner: underthesea call failed", exc_info=True)
             return []
 
+        freq = _load_syllable_freq()
         spans = self._align_and_merge(expanded_text, tagged)
         results = []
         for start, end, entity_type in spans:
             if entity_type not in entities:
                 continue
-            if not _looks_like_named_entity(expanded_text[start:end]):
+            sentence_initial = _is_sentence_initial(expanded_text, start)
+            score = _score_entity(expanded_text[start:end], sentence_initial, freq)
+            if score <= 0.0:
                 continue
             mapped = _map_span_to_original(start, end, mapping)
             if mapped is None:
                 continue
             orig_start, orig_end = mapped
             results.append(
-                RecognizerResult(entity_type=entity_type, start=orig_start, end=orig_end, score=SCORE)
+                RecognizerResult(entity_type=entity_type, start=orig_start, end=orig_end, score=score)
             )
         return results
 

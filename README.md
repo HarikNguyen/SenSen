@@ -11,7 +11,7 @@ mobile-number recognizer and a Vietnamese-aware NER (underthesea) replacing
 LLM pass adding 2 more categories regex fundamentally can't reach
 (trade-secret content, sensitive HR content).
 
-Status: **working local MVP** — 38/38 automated tests passing, tested end to
+Status: **working local MVP** — 40/40 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -141,7 +141,7 @@ at a folder, it scans every `.txt/.pdf/.docx` in it and ranks documents by a
 weighted risk score (live secrets > contract/financial/HR IDs > IP markers),
 so a human reviewer knows which document to open first instead of reading a
 flat entity dump — turns single-document scanning into a corpus-wide audit.
-See `ASSESSMENT_REPORT.md` for a real run against the 8 synthetic documents
+See `ASSESSMENT_REPORT.md` for a real run against the 9 synthetic documents
 in `sample_corpus/` (all fake data, safe to commit).
 
 ## The 11 custom categories
@@ -335,20 +335,35 @@ follow-up once actual usage is observed).
   that was previously invisible entirely, and correctly bounds real
   compound place names ("Phường Thủ Thiêm").
 
-  Known residual gaps, documented rather than chased further: (1) a single
-  capitalized non-Vietnamese word can still slip through (e.g. "Backup");
-  (2) underthesea sometimes assigns the wrong *type* even with the right
+  Fourth round: the Title Case filter above was a hard keep/reject gate,
+  and every kept result got a flat `0.6` — which meant this recognizer,
+  alone among every other one in this codebase, ignored the caller's
+  `confidence_threshold` entirely. Tried fixing the remaining single-word
+  noise ("Được", "Xét", "Cục") with the syllable-frequency table already
+  built for word-fusion repair — checking raw frequency doesn't work
+  (verified: "cục"=61 sits right next to real name syllables like
+  "thủ"=143), so that alone isn't a usable signal. Replaced the hard gate
+  with `_score_entity()`: a graduated score built from *dictionary
+  membership* (not frequency) plus two more signals — multi-word spans get
+  a bonus (a real full name or place is almost always 2+ words) and
+  sentence/bullet-initial single words get a penalty. Verified this
+  actually separates cleanly on the real documents that surfaced the
+  problem: every real name/place lands at `0.65`, every false positive at
+  `0.15`–`0.25` — and unlike the flat score, this respects
+  `confidence_threshold` like every other category, so a caller asking for
+  a normal operating threshold (`0.5`+) sees none of the noise, without a
+  hard-coded denylist. Bonus catch: this also cleared the round-2 "Backup"
+  gap (a single capitalized non-Vietnamese word) at `0.5`+, since it has
+  no multi-word bonus and no dictionary-membership penalty to offset its
+  sentence-initial one.
+
+  Known residual gaps, not fixed by scoring and not chased further:
+  underthesea sometimes assigns the wrong *type* even with the right
   span — "Phường Thủ Thiêm" came back as PERSON instead of LOCATION, "Chủ
   Nhật" (Sunday) as LOCATION instead of not-an-entity — a type-confusion
-  issue distinct from the segmentation one, consistent with the
-  already-known ORG/LOC unreliability below; (3) common single words that
-  are capitalized only because they start a sentence/bullet ("Được", "Xét",
-  "Cục") can still pass the Title Case filter — sentence-initial
-  capitalization looking like a proper noun is a generic, hard NER problem
-  in any language, not specific to this fix. Also still true: underthesea's
-  ORG/LOC boundary isn't always reliable (a company name merged into a
-  wrongly-tagged LOCATION span in one test), so results carry a flat 0.6
-  score rather than a calibrated one.
+  issue distinct from segmentation or scoring (a wrong type on an
+  otherwise-plausible-shaped span still scores like a real one), consistent
+  with the already-known ORG/LOC unreliability below.
 - **No OCR.** Scanned/image PDFs raise a clear 422, not a silent failure.
   Deliberate: OCR is the CPU "sát thủ phần cứng" (hardware killer) to avoid
   on weak local hardware, and Azure AI Document Intelligence's free F0 tier
@@ -466,7 +481,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                38 tests total: detection (positive/negative/ambiguous),
+tests/                40 tests total: detection (positive/negative/ambiguous),
                       file-upload, deep-scan, VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
