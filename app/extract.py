@@ -15,7 +15,7 @@ from pathlib import Path
 import pymupdf
 import pytesseract
 from docx import Document
-from PIL import Image
+from PIL import Image, ImageFilter
 
 logger = logging.getLogger("sensen.extract")
 
@@ -106,6 +106,23 @@ def _ocr_page(page) -> str:
     # overhead on a path this module's own docstring calls CPU-heavy.
     mode = "RGBA" if pix.alpha else "RGB"
     img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    # Median filter: found via testing a realistic degraded scan (blur +
+    # slight rotation + photocopy-style speckle noise) that Tesseract's
+    # accuracy craters specifically on the noise component — blur and
+    # rotation alone didn't hurt it (still 6/6 entities correct either way),
+    # but noise alone turned a 6/6 detection into 0/6 correct (CCCD and
+    # phone numbers fragmented by spurious spaces, names unrecoverable).
+    # Kernel size mattered more than expected: size=3 barely helped once
+    # actually measured through this function's real dpi=200 pixmap (an
+    # earlier check that looked promising used a lower, non-representative
+    # DPI by mistake) — each noise pixel from the source scan gets
+    # upsampled into a multi-pixel blob at 200 DPI, bigger than a 3x3
+    # kernel. size=5 fully recovered the noise-only case but still lost
+    # entities on the combined blur+rotate+noise case; size=7 recovers
+    # that too (6/6, matching the clean-scan baseline) with no regression
+    # on an actually-clean scan (re-verified after each kernel-size change,
+    # not just the noisy case).
+    img = img.filter(ImageFilter.MedianFilter(size=7))
     try:
         return pytesseract.image_to_string(img, lang=OCR_LANGUAGES)
     except pytesseract.TesseractNotFoundError:

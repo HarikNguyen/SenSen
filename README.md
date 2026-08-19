@@ -457,6 +457,32 @@ follow-up once actual usage is observed).
   PNG-encode-then-decode round-trip to `Image.frombytes` directly off the
   pixmap (an efficiency fix from the same pass — verified it doesn't change
   OCR output).
+
+  **A more realistic worst case than a corrupt file: a genuinely degraded
+  scan.** Pushed on to test something closer to a real bad document instead
+  of synthetic garbage bytes — built a test PDF simulating a photocopy/photo
+  of a contract (Gaussian blur + a 2.5° rotation + photocopy-style speckle
+  noise) and tested each factor isolated and combined. Blur and rotation
+  alone didn't hurt accuracy at all — still 6/6 real entities detected
+  correctly either way. Speckle noise alone was the actual culprit: it
+  alone dropped detection to 0/6 correct (the CCCD number got OCR'd with
+  spurious internal spaces breaking its 12-digit pattern, real names became
+  unrecoverable garbage, a phone number was invented from noise). Root
+  cause and fix: added a median filter to `_ocr_page` in `app/extract.py`
+  before handing the image to Tesseract — but the first attempt (a 3x3
+  kernel) barely helped once actually measured through the real `dpi=200`
+  render this function uses (an earlier check that looked promising had
+  used a lower, non-representative resolution by mistake — a reminder to
+  verify against the exact code path, not a shortcut that looks similar).
+  At 200 DPI each noise pixel from the source gets upsampled into a
+  multi-pixel blob, too big for a 3x3 kernel; a 5x5 kernel fully fixed the
+  noise-only case but still lost entities on the combined blur+rotate+noise
+  case; a 7x7 kernel recovers that too (6/6, matching the clean-scan
+  baseline), with no regression re-verified on an actually-clean scan at
+  each step. This specific accuracy check isn't part of the automated
+  `pytest` suite — it inherently needs real Tesseract output quality, which
+  only exists inside the Docker verification, not in this local dev
+  environment (no local `tesseract` binary, see above) or a mock.
 - **Digit-pattern ambiguity is inherent, not fully solved.** VN tax codes and
   phone numbers are both 10 digits; the mobile-prefix exclusion handles the
   common case, not all of it — an inherent precision tradeoff of
