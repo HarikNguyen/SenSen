@@ -13,13 +13,14 @@ for PDFs that lose spaces at the font level, a gazetteer-corrected NER layer
 (Vietnamese calendar terms and administrative-unit prefixes) that fixes
 type-confusion underthesea gets wrong on its own, local OCR (Tesseract,
 Vietnamese+English) for scanned PDFs with no cloud dependency, and an opt-in
-"deep scan" LLM pass adding 2 more categories regex fundamentally can't
-reach (trade-secret content, sensitive HR content). Every one of these was
+"deep scan" LLM pass adding 3 more categories regex fundamentally can't
+reach (trade-secret content, sensitive HR content, full Vietnamese company
+names where regex/NER boundary detection has no safe answer). Every one of these was
 built and tuned against real documents, not synthetic examples alone — see
 Known Limitations for what's still imperfect and why, and the "Why it's
 built this way" sections below for what was tried and rejected along the way.
 
-Status: **working local MVP** — 53/53 automated tests passing, tested end to
+Status: **working local MVP** — 55/55 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls) and inside a built Docker
 image. Scoped to local use, not deployed publicly.
 
@@ -308,6 +309,7 @@ few-shot examples — no other code changes needed, same story as
 |---|---|
 | `IP_TRADE_SECRET_CONTENT` | Upgrades the regex-only `IP_SENSITIVE_MARKER` (which only matches the literal word "confidential") into real detection of trade-secret-shaped content — proprietary algorithms, formulas, unreleased specs |
 | `HR_SENSITIVE_CONTENT` | Performance-review / disciplinary content — no regex-detectable shape at all |
+| `ORGANIZATION` | Full Vietnamese company names ("Công ty TNHH/Cổ phần X") — fixes a documented span-boundary limitation the free regex+NER path can't safely solve on its own (see Known Limitations) |
 
 Two things worth knowing:
 - **Scores are a fixed placeholder** (`0.6`) — langextract doesn't produce a
@@ -394,21 +396,38 @@ follow-up once actual usage is observed).
   `sample_corpus/full_coverage_demo.txt`, the rest of `sample_corpus/`):
   both false positives gone, every previously-correct entity unchanged.
 
-  One type-confusion case investigated and explicitly not fixed: a company
-  name truncated to its last 1-2 words ("Toàn Cầu" from "Công ty Cổ phần
-  Đầu Tư Toàn Cầu") tagged LOCATION instead of ORGANIZATION — this is a
-  span-boundary problem, not a type problem, so the gazetteer approach
-  above doesn't apply. Tried anchoring on Vietnamese legal-entity prefixes
-  ("Công ty TNHH/Cổ phần/...") via regex, both unbounded and capped at 4
-  words; 4 of 5 real test sentences over-matched into unrelated trailing
-  text ("Công ty TNHH Thiên Tứ Điện thoại", "...và bà", "...làm việc")
-  because `recognizers.yaml`'s global `IGNORECASE` flag rules out using
-  capitalization as a stopping signal, and Vietnamese has no other reliable
-  "end of proper name" delimiter — also found underthesea often detects
-  *no* organization span at all for these names in isolation, leaving
-  nothing to type-correct. Documented as a permanent known limitation
-  rather than shipping a regex that trades a rare wrong-type bug for a more
-  frequent wrong-boundary one.
+  One type-confusion case investigated at length on the regex/NER side and
+  ultimately solved a different way: a company name truncated to its last
+  1-2 words ("Toàn Cầu" from "Công ty Cổ phần Đầu Tư Toàn Cầu") tagged
+  LOCATION instead of ORGANIZATION — a span-boundary problem, not a type
+  problem, so the gazetteer approach above doesn't apply. Tried anchoring
+  on Vietnamese legal-entity prefixes ("Công ty TNHH/Cổ phần/...") via
+  regex twice: first case-insensitively (matching `recognizers.yaml`'s
+  global `IGNORECASE` flag), both unbounded and capped at 4 words — 4 of 5
+  real test sentences over-matched into unrelated trailing text ("Công ty
+  TNHH Thiên Tứ Điện thoại", "...và bà", "...làm việc"), and underthesea
+  itself often detects *no* organization span at all for these names in
+  isolation, leaving nothing to type-correct either. Second attempt:
+  registered a dedicated `PatternRecognizer` in Python (not YAML) with its
+  own `global_regex_flags` *without* `IGNORECASE` — Presidio's YAML schema
+  only exposes one global flag for the whole file, but a programmatically-
+  registered recognizer can set its own, letting real capitalization act
+  as the "end of name" signal this problem needed. That got 4 of 5 cases
+  exactly right (including recovering the *full* "Công ty Cổ phần Đầu Tư
+  Toàn Cầu" — better than underthesea managed on its own) and reduced the
+  5th case's error from swallowing a whole trailing clause down to one
+  extra word, since the immediately-following label ("Điện thoại:") is
+  also capitalized in Vietnamese and there's no delimiter between them.
+  Given that residual and the effort already spent, the actual fix shipped
+  is different: extended deep scan (opt-in, see below) with a third
+  extraction class, `ORGANIZATION` — an LLM doesn't have a "no reliable
+  delimiter" problem here, it can use real semantic understanding of what
+  a company name is. Verified against the same 5 real test sentences via
+  the live Gemini API: 5 of 5 exactly right, including the one case the
+  case-sensitive regex still got wrong. This only fixes it when a caller
+  opts into `deep_scan=true`; the free/default regex+NER path keeps its
+  documented limitation, since fixing this on that path specifically was
+  the part that turned out not to have a safe answer.
 
   Sixth round, found by testing a two-column-layout document (a realistic
   "hard" scenario, requested explicitly instead of more synthetic
@@ -688,7 +707,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                53 tests total: detection (positive/negative/ambiguous),
+tests/                55 tests total: detection (positive/negative/ambiguous),
                       file-upload, OCR fallback, deep-scan (incl. retry),
                       VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage

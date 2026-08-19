@@ -77,10 +77,15 @@ _MAX_ATTEMPTS = 2
 PROMPT_DESCRIPTION = (
     "Identify sentences or clauses that disclose a company trade secret "
     "(proprietary algorithms, formulas, unreleased product specs, "
-    "manufacturing know-how) as IP_TRADE_SECRET_CONTENT, or that discuss "
+    "manufacturing know-how) as IP_TRADE_SECRET_CONTENT, that discuss "
     "sensitive HR matters (performance reviews, disciplinary action, "
-    "employee complaints) as HR_SENSITIVE_CONTENT. Extract the exact "
-    "sentence containing the sensitive content, verbatim."
+    "employee complaints) as HR_SENSITIVE_CONTENT, or that name a "
+    "Vietnamese company with its full legal entity type (e.g. 'Công ty "
+    "TNHH X', 'Công ty Cổ phần Y', 'Tập đoàn Z') as ORGANIZATION. For "
+    "IP_TRADE_SECRET_CONTENT and HR_SENSITIVE_CONTENT, extract the exact "
+    "sentence containing the sensitive content, verbatim. For "
+    "ORGANIZATION, extract only the company name phrase itself (including "
+    "its legal entity type prefix), not any surrounding text."
 )
 
 EXAMPLES = [
@@ -145,6 +150,37 @@ EXAMPLES = [
                     "chỉ tiêu doanh số, đề xuất đưa vào diện theo dõi cải "
                     "thiện (PIP)."
                 ),
+            )
+        ],
+    ),
+    # ORGANIZATION: added because the regex-free default path (underthesea
+    # NER in app/vi_ner.py) has a documented, explicitly-not-fixed limit —
+    # it often truncates a Vietnamese company name to its last 1-2 words
+    # and/or mistypes it as LOCATION, because there's no reliable "end of
+    # proper name" delimiter available to a regex/NER approach here (see
+    # README Known Limitations for the full investigation). An LLM doesn't
+    # have that problem — it can use real semantic understanding of what a
+    # company name is, not just capitalization. This only runs when the
+    # caller opts into deep_scan=true, so it doesn't change the free/
+    # default path's behavior at all — see module docstring above.
+    lx.data.ExampleData(
+        text=(
+            "Đại diện cho Công ty TNHH Thiên Phú và bà Nguyễn Thị Lan Anh, "
+            "đại diện phòng Pháp chế."
+        ),
+        extractions=[
+            lx.data.Extraction(
+                extraction_class="ORGANIZATION",
+                extraction_text="Công ty TNHH Thiên Phú",
+            )
+        ],
+    ),
+    lx.data.ExampleData(
+        text="Bên B ký hợp đồng hợp tác với đại diện Công ty Cổ phần Đầu Tư Toàn Cầu.",
+        extractions=[
+            lx.data.Extraction(
+                extraction_class="ORGANIZATION",
+                extraction_text="Công ty Cổ phần Đầu Tư Toàn Cầu",
             )
         ],
     ),

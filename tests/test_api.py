@@ -380,6 +380,56 @@ def test_deep_scan_merges_successful_extraction(client, api_key, monkeypatch):
     assert "HR_SENSITIVE_CONTENT" in entity_types(resp)
 
 
+def test_deep_scan_organization_examples_are_well_formed():
+    # Sanity check on the few-shot data itself: added to fix a documented,
+    # explicitly-not-fixed limitation of the free/default path (underthesea
+    # NER truncates Vietnamese company names) -- verified for real against
+    # the live Gemini API when this was built (not part of this offline
+    # check, since that needs a real network call and API key), this just
+    # guards against a future edit breaking the example data's shape.
+    from app.deep_scan import EXAMPLES
+
+    org_extractions = [
+        ext
+        for ex in EXAMPLES
+        for ext in ex.extractions
+        if ext.extraction_class == "ORGANIZATION"
+    ]
+    assert len(org_extractions) >= 2
+    for ext in org_extractions:
+        assert ext.extraction_text.startswith("Công ty")
+
+
+def test_deep_scan_organization_merges_into_response(client, api_key, monkeypatch):
+    # Full-company-name extraction only runs when deep_scan=true is
+    # explicitly requested -- the free/default regex+NER path is unchanged
+    # (still has the documented truncation limitation on its own).
+    def _fake(text, model_id=None):
+        idx = text.index("Công ty")
+        entity = DetectedEntity(
+            entity_type="ORGANIZATION",
+            location=EntityLocation(start=idx, end=idx + len("Công ty Cổ phần Đầu Tư Toàn Cầu")),
+            text_val="Công ty Cổ phần Đầu Tư Toàn Cầu",
+            score=0.6,
+            context_snippet=text,
+        )
+        return [entity], "ok"
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _fake)
+    resp = client.post(
+        "/api/v1/scan",
+        json={
+            "text": "đại diện Công ty Cổ phần Đầu Tư Toàn Cầu.",
+            "deep_scan": True,
+        },
+        headers={"X-API-Key": api_key},
+    )
+    body = resp.json()
+    assert body["deep_scan_status"] == "ok"
+    entities = {(e["entity_type"], e["text_val"]) for e in body["detected_entities"]}
+    assert ("ORGANIZATION", "Công ty Cổ phần Đầu Tư Toàn Cầu") in entities
+
+
 def test_deep_scan_failure_falls_back_to_regex_results(client, api_key, monkeypatch):
     monkeypatch.setattr("app.scanning.run_deep_scan", lambda text, model_id=None: ([], "skipped_error"))
     resp = client.post(
