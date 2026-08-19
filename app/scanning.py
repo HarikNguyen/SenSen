@@ -26,6 +26,30 @@ SUPPORTED_LANGUAGES = {"en"}
 # not NER-dependent) — a real Vietnamese model is a roadmap item, see README.
 
 
+def _drop_lower_scored_exact_duplicates(results: list) -> list:
+    """When two different categories match the exact same [start, end) span,
+    keep only the highest-scoring one.
+
+    Found via Presidio's own built-in multi-region PhoneRecognizer (kept at
+    its full 8-region default on purpose — narrowing it was considered and
+    rejected, since phone coverage needs to stay broad, not VN/US-only):
+    a CIDR block, a VN national ID, and a VN tax code each also happen to
+    match some other country's phone-number shape, always at a low 0.4 vs.
+    the correct category's 0.6-0.9. The text can't genuinely be two
+    different identifier types at once, so the lower-scoring duplicate on
+    the identical span is redundant noise, not a second real finding — this
+    fixes that without touching PhoneRecognizer's region list at all, so
+    real international phone coverage is untouched.
+    """
+    best_by_span: dict = {}
+    for r in results:
+        key = (r.start, r.end)
+        current = best_by_span.get(key)
+        if current is None or r.score > current.score:
+            best_by_span[key] = r
+    return list(best_by_span.values())
+
+
 def run_scan(
     text: str,
     language: str,
@@ -58,6 +82,7 @@ def run_scan(
     results = analyzer.analyze(
         text=text, language=language, score_threshold=confidence_threshold
     )
+    results = _drop_lower_scored_exact_duplicates(results)
     results = sorted(results, key=lambda r: r.start)
 
     entities = [

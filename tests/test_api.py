@@ -364,6 +364,20 @@ def test_vn_national_id_context_outscores_bare_digits(scan):
     assert not bare_scores or max(ctx_scores) > max(bare_scores)
 
 
+def test_exact_span_duplicate_across_categories_keeps_only_highest_score(scan):
+    # Presidio's built-in PhoneRecognizer (kept at its full default region
+    # list on purpose -- see app/scanning.py's _drop_lower_scored_exact_
+    # duplicates docstring for why narrowing it was rejected) also matches
+    # a VN national ID's digit shape under some other region's numbering
+    # plan, always at a lower score than the correct category. The
+    # lower-scoring PHONE_NUMBER duplicate on the exact same span should be
+    # dropped, not shown alongside the correct VN_NATIONAL_ID hit.
+    resp = scan("Số CCCD: 051195344431 cấp tại Hà Nội.", confidence_threshold=0.3)
+    entities = resp.json()["detected_entities"]
+    same_span = [e for e in entities if e["location"]["start"] == 9 and e["location"]["end"] == 21]
+    assert {e["entity_type"] for e in same_span} == {"VN_NATIONAL_ID"}
+
+
 def test_vietnamese_ner_now_correct_instead_of_noisy(scan):
     # Before: SpacyRecognizer (English NER) tagged this exact sentence shape
     # with PERSON/ORGANIZATION/LOCATION garbage on fragments like "Ông/Bà".

@@ -11,7 +11,7 @@ mobile-number recognizer and a Vietnamese-aware NER (underthesea) replacing
 LLM pass adding 2 more categories regex fundamentally can't reach
 (trade-secret content, sensitive HR content).
 
-Status: **working local MVP** — 40/40 automated tests passing, tested end to
+Status: **working local MVP** — 41/41 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls). Not yet deployed publicly.
 
 ## Why it's built this way
@@ -376,6 +376,22 @@ follow-up once actual usage is observed).
   phone numbers are both 10 digits; the mobile-prefix exclusion handles the
   common case, not all of it — an inherent precision tradeoff of
   regex-based detection, mitigated rather than eliminated.
+- **Same-span duplicates across categories, fixed without narrowing phone
+  coverage.** Found via the full-coverage test doc: Presidio's built-in
+  multi-region `PhoneRecognizer` also matched a CIDR block, a VN national
+  ID and a VN tax code — each under some *other* country's phone-number
+  shape (`DE`/`IN`/`BR` specifically), always at a lower score than the
+  correct category. The direct fix — narrowing `supported_regions` — was
+  considered and explicitly rejected: this product needs phone detection to
+  work broadly, not just VN/US, so trading away region coverage to fix a
+  scoring artifact was the wrong tradeoff. Fixed instead at the application
+  layer: `_drop_lower_scored_exact_duplicates()` in `app/scanning.py` keeps
+  only the highest-scoring result when two categories match the *exact
+  same* `[start, end)` span — the text can't genuinely be two different
+  identifier types at once, so a lower-scoring duplicate on the identical
+  span is redundant noise, not a second real finding. All 8 phone regions
+  stay fully active; a real US/GB/etc. number is untouched, only the
+  redundant low-score duplicate disappears.
 - **`saas.db` is a local file**, fine for MVP/demo, not for concurrent
   production writers — swap the `DATABASE_URL` env var (`SENSEN_DATABASE_URL`)
   for Postgres when that matters.
@@ -481,7 +497,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                40 tests total: detection (positive/negative/ambiguous),
+tests/                41 tests total: detection (positive/negative/ambiguous),
                       file-upload, deep-scan, VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage
 scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Assessment Report)
