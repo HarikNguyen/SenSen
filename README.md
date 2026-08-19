@@ -19,7 +19,7 @@ built and tuned against real documents, not synthetic examples alone — see
 Known Limitations for what's still imperfect and why, and the "Why it's
 built this way" sections below for what was tried and rejected along the way.
 
-Status: **working local MVP** — 48/48 automated tests passing, tested end to
+Status: **working local MVP** — 51/51 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls) and inside a built Docker
 image. Scoped to local use, not deployed publicly.
 
@@ -480,6 +480,34 @@ follow-up once actual usage is observed).
 - **`saas.db` is a local file**, fine for MVP/demo, not for concurrent
   production writers — swap the `DATABASE_URL` env var (`SENSEN_DATABASE_URL`)
   for Postgres when that matters.
+- **Adversarial file-upload testing found and fixed 2 real crash bugs.**
+  Explicit request to test worst-case/hostile inputs, not just happy-path
+  ones — a corrupted or empty `.pdf` and a corrupted `.docx` both crashed
+  with an unhandled 500 instead of the documented clear 422:
+  `pymupdf.open()` raises its own `FileDataError` (its `EmptyFileError`
+  subclass covers the 0-byte case too) for a malformed PDF, and
+  `python-docx`'s `Document()` doesn't guarantee one exception type for a
+  malformed `.docx` (confirmed empirically: `zipfile.BadZipFile` for a
+  non-zip file, a plain `KeyError` for a valid zip that isn't a real docx
+  package) — neither was caught before, both are now (`app/extract.py`).
+  Other worst-case scenarios tested and found already handled correctly,
+  no fix needed: a 21-page scanned PDF (over `MAX_OCR_PAGES`), text at and
+  above `MAX_TEXT_LENGTH`, a 25MB upload (rejected fast once decoded — see
+  below for the residual risk this doesn't cover), a missing filename, an
+  adversarially long unbroken "word" fed to the DP word-segmentation repair
+  (50,000 chars in ~1.5s, no blowup), and the `FINANCIAL_CREDENTIAL`
+  pattern's lazy quantifier against a crafted no-match input (bounded by
+  its own `{0,60}` cap, no catastrophic backtracking). Residual, not fixed:
+  `scan_file` reads the entire upload into memory before any size check
+  (`await file.read()` in `app/pages.py`) — a 25MB file is rejected in
+  under 0.3s once decoded, so this is low-severity at realistic sizes, but
+  an upload sized in the hundreds of MB to GB range would still consume
+  that much memory before `MAX_TEXT_LENGTH` ever gets a chance to reject
+  it. Not fixed here since it needs a genuine policy decision (a hard
+  upload-size cap, likely in FastAPI/uvicorn config or a streaming read
+  with an early bailout) rather than a one-line patch, and the project's
+  own scoping (local use, not exposed publicly) makes this lower priority
+  than the two crash bugs above.
 - **Deep scan used to fail intermittently — this was a real, reproduced
   bug, not FUD, now mitigated with a retry.** Found by testing
   `sample_corpus/full_coverage_demo.txt`: the exact same call (same text,
@@ -603,7 +631,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                48 tests total: detection (positive/negative/ambiguous),
+tests/                51 tests total: detection (positive/negative/ambiguous),
                       file-upload, OCR fallback, deep-scan (incl. retry),
                       VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage

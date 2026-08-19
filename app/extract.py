@@ -52,7 +52,17 @@ def extract_text(filename: str, raw: bytes) -> tuple[str, str, int, str]:
 
 
 def _extract_pdf(raw: bytes) -> tuple[str, str, int, str]:
-    doc = pymupdf.open(stream=raw, filetype="pdf")
+    try:
+        doc = pymupdf.open(stream=raw, filetype="pdf")
+    except pymupdf.FileDataError as exc:
+        # Covers both a corrupt/malformed PDF and an empty (0-byte) upload —
+        # EmptyFileError subclasses FileDataError. Without this, either one
+        # crashed as an unhandled 500 instead of the documented clear 422
+        # (found via adversarial file-upload testing, not a hypothetical).
+        raise UnsupportedFileType(
+            f"This file isn't a valid PDF (couldn't be opened: {exc}). "
+            f"Check it isn't corrupted or empty."
+        ) from exc
     try:
         pages = [page.get_text() for page in doc]
         # Per-page, not just document-wide: a PDF can mix digital-text pages
@@ -126,7 +136,20 @@ def _ocr_page(page) -> str:
 
 
 def _extract_docx(raw: bytes) -> tuple[str, str, int, str]:
-    document = Document(io.BytesIO(raw))
+    try:
+        document = Document(io.BytesIO(raw))
+    except Exception as exc:
+        # python-docx doesn't guarantee one exception type for a malformed
+        # file — a non-zip raises zipfile.BadZipFile, a valid zip that isn't
+        # a real docx (e.g. missing [Content_Types].xml) raises a plain
+        # KeyError, confirmed empirically for both. Catching broadly here
+        # (scoped tightly to just this constructor call, same pattern as
+        # the third-party-library try/excepts elsewhere in this codebase)
+        # rather than enumerating every possible internal exception type.
+        raise UnsupportedFileType(
+            f"This file isn't a valid .docx (couldn't be opened: {exc}). "
+            f"Check it isn't corrupted."
+        ) from exc
     parts = [p.text for p in document.paragraphs]
 
     # Flatten tables to pipe-delimited rows so cell values keep context for scoring.

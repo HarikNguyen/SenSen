@@ -177,6 +177,50 @@ def test_scan_unsupported_file_type_rejected(client, api_key):
     assert resp.status_code == 422
 
 
+def test_corrupt_pdf_rejected_cleanly_not_a_500(client, api_key):
+    # Found via adversarial file-upload testing: pymupdf.open() raises its
+    # own FileDataError for a malformed PDF, which used to propagate as an
+    # unhandled 500 instead of the documented clear 422.
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("garbage.pdf", b"this is not a valid pdf at all", "application/pdf")},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "pdf" in resp.json()["detail"].lower()
+
+
+def test_empty_pdf_rejected_cleanly_not_a_500(client, api_key):
+    # Same root cause as the corrupt-PDF case: pymupdf.EmptyFileError is a
+    # FileDataError subclass, previously uncaught.
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("empty.pdf", b"", "application/pdf")},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+
+
+def test_corrupt_docx_rejected_cleanly_not_a_500(client, api_key):
+    # python-docx's Document() doesn't guarantee one exception type for a
+    # malformed file (confirmed empirically: zipfile.BadZipFile for a
+    # non-zip, a plain KeyError for a valid zip that isn't a real docx) —
+    # previously uncaught either way, an unhandled 500.
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={
+            "file": (
+                "garbage.docx",
+                b"not a real docx zip file",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "docx" in resp.json()["detail"].lower()
+
+
 def _build_image_only_pdf(num_pages: int = 1) -> bytes:
     # A page with only an inserted image, no text layer -- same shape as a
     # real scanned document, exercises app/extract.py's OCR fallback path.
