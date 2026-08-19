@@ -440,12 +440,17 @@ follow-up once actual usage is observed).
 
 ## Deployment (Azure Container Apps)
 
-The `Dockerfile` itself is verified, not theoretical: `docker build` (656MB
-image) → `docker run` → `/register` → `/api/v1/scan` all passed locally,
-correctly returning `CONTRACT_ID`/`EMAIL_ADDRESS` for a test document. What's
-untested is only the Azure side — this environment has no `az` CLI session
-available to it. Commands to run yourself from the repo root once logged in
-(`az login`):
+The `Dockerfile` itself is verified, not theoretical — re-verified after all
+the VN/deep-scan work in this README (underthesea + langextract grew the
+image from 656MB to 821MB): `docker build` → `docker run` → `/register` →
+`/api/v1/scan` all passed locally against the current codebase, correctly
+returning `CONTRACT_ID`/`EMAIL_ADDRESS`/`PHONE_NUMBER`/`VN_NATIONAL_ID` for
+a test document. What's untested is only the Azure side — this environment
+has no `az` CLI session available to it, and deployment is the one thing in
+this whole project that's genuinely blocked on you, not on more building:
+it needs your interactive `az login` and your Azure credit, neither of
+which can happen from here. Commands to run yourself from the repo root
+once logged in (`az login`):
 
 ```bash
 az group create -n sensen-rg -l southeastasia
@@ -464,6 +469,16 @@ you a public HTTPS URL. Swap `SENSEN_DATABASE_URL` for a real path if you
 want the SQLite file to persist across revisions (Container Apps' local disk
 is ephemeral by default — for the MVP demo this is fine since state is just
 `users`/`api_keys`, re-registering is cheap).
+
+Set `LANGEXTRACT_API_KEY` as a secret afterward if you want deep_scan to
+actually work in production, not just report `skipped_no_key`:
+
+```bash
+az containerapp secret set --name sensen-api --resource-group sensen-rg \
+  --secrets langextract-key=<your_key>
+az containerapp update --name sensen-api --resource-group sensen-rg \
+  --set-env-vars LANGEXTRACT_API_KEY=secretref:langextract-key
+```
 
 ## Reference / prior art
 
