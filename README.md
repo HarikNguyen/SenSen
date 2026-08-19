@@ -438,6 +438,25 @@ follow-up once actual usage is observed).
   step needs your password, which isn't available in this environment to
   do it for you) — without it, a scanned PDF gives a clear 422 naming the
   missing binary rather than a silent failure.
+
+  A follow-up `/code-review high --fix` pass caught two real bugs in the
+  first version of this before they shipped further: (1) `_extract_pdf`
+  checked `text.strip()` over the whole joined document, so a PDF mixing
+  digital-text pages with a scanned page (e.g. a typed contract with a
+  scanned signature page) got treated as fully "has a text layer" and the
+  scanned page's content was silently dropped, no error, no OCR attempt —
+  fixed to check per page and OCR only the pages that need it. (2)
+  `_ocr_page` only caught `TesseractNotFoundError`; a present-but-broken
+  install (`tesseract-ocr` without `tesseract-ocr-vie`, a plausible partial
+  install given the two-package instruction above) raised
+  `pytesseract.TesseractError` instead, which propagated as an unhandled
+  500 instead of the documented 422 — added the missing except branch.
+  Both re-verified in the same Docker setup: a mixed digital+scanned test
+  PDF now returns both pages' content, and a real tesseract call still
+  works correctly after also swapping the OCR image-build path from a
+  PNG-encode-then-decode round-trip to `Image.frombytes` directly off the
+  pixmap (an efficiency fix from the same pass — verified it doesn't change
+  OCR output).
 - **Digit-pattern ambiguity is inherent, not fully solved.** VN tax codes and
   phone numbers are both 10 digits; the mobile-prefix exclusion handles the
   common case, not all of it — an inherent precision tradeoff of

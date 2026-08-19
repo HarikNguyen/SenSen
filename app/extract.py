@@ -55,9 +55,13 @@ def _extract_pdf(raw: bytes) -> tuple[str, str, int, str]:
     doc = pymupdf.open(stream=raw, filetype="pdf")
     try:
         pages = [page.get_text() for page in doc]
-        text = "\n".join(pages)
-        if text.strip():
-            return text, "pdf", len(pages), "direct_text_extraction"
+        # Per-page, not just document-wide: a PDF can mix digital-text pages
+        # with scanned/image ones (e.g. a typed contract with a scanned
+        # signature page) -- a single whole-document text.strip() check would
+        # treat the whole file as "has a text layer" and silently skip OCR
+        # for the blank/scanned pages, dropping their content with no error.
+        if all(p.strip() for p in pages):
+            return "\n".join(pages), "pdf", len(pages), "direct_text_extraction"
 
         if len(doc) > MAX_OCR_PAGES:
             raise UnsupportedFileType(
@@ -66,13 +70,19 @@ def _extract_pdf(raw: bytes) -> tuple[str, str, int, str]:
                 f"— OCR is CPU-heavy, capped to keep it bounded on modest hardware."
             )
 
-        ocr_text = "\n".join(_ocr_page(page) for page in doc)
-        if not ocr_text.strip():
+        # OCR only the pages that lack a text layer; reuse the digital text
+        # already extracted above for the rest, instead of re-OCR-ing pages
+        # that don't need it.
+        merged = [p if p.strip() else _ocr_page(page) for p, page in zip(pages, doc)]
+        merged_text = "\n".join(merged)
+        if not merged_text.strip():
             raise UnsupportedFileType(
                 "This PDF has no extractable text layer, and OCR found no "
                 "readable text either (likely blank pages or very low scan quality)."
             )
-        return ocr_text, "pdf", len(pages), "ocr"
+        # Reaching here means at least one page had no text layer and was
+        # OCR'd (the all-pages-have-text case already returned above).
+        return merged_text, "pdf", len(pages), "ocr"
     finally:
         doc.close()
 
@@ -81,7 +91,11 @@ def _ocr_page(page) -> str:
     # 200 DPI: enough resolution for OCR accuracy without the memory/CPU
     # cost of a full print-resolution render on a low-RAM host.
     pix = page.get_pixmap(dpi=200)
-    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    # Build the PIL image directly from the pixmap's raw samples rather than
+    # round-tripping through a PNG encode (tobytes("png")) + decode -- pure
+    # overhead on a path this module's own docstring calls CPU-heavy.
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
     try:
         return pytesseract.image_to_string(img, lang=OCR_LANGUAGES)
     except pytesseract.TesseractNotFoundError:
@@ -92,6 +106,22 @@ def _ocr_page(page) -> str:
         raise UnsupportedFileType(
             "This PDF has no extractable text layer and needs OCR, but the "
             "server's tesseract binary isn't installed. See README."
+        ) from None
+    except pytesseract.TesseractError as exc:
+        # Distinct from TesseractNotFoundError: the binary is present but a
+        # call still failed (most commonly missing/corrupt language data,
+        # e.g. tesseract-ocr installed without tesseract-ocr-vie) -- without
+        # this, it propagates as an unhandled 500 instead of the documented
+        # clear 422.
+        logger.error(
+            "OCR requested but tesseract failed to process the page (often "
+            "missing language data, e.g. tesseract-ocr-vie) — see README: %s",
+            exc,
+        )
+        raise UnsupportedFileType(
+            "This PDF has no extractable text layer and needs OCR, but the "
+            "server's tesseract call failed (often missing language data, "
+            "e.g. tesseract-ocr-vie). See README."
         ) from None
 
 

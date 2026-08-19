@@ -144,6 +144,11 @@ _CALENDAR_TERMS = {
 _ADMIN_UNIT_PREFIXES = {
     "phường", "quận", "huyện", "tỉnh", "xã", "thị trấn", "thành phố",
 }
+# Some prefixes above are two words ("thị trấn", "thành phố") — matching must
+# try the longest leading word-group first, or a single-word .split()
+# comparison silently never matches them (found in review: the original
+# words[0]-only check made "thị trấn"/"thành phố" dead entries).
+_ADMIN_UNIT_PREFIX_MAX_WORDS = max(len(p.split()) for p in _ADMIN_UNIT_PREFIXES)
 
 
 def _normalized_words(span_text: str) -> List[str]:
@@ -153,8 +158,9 @@ def _normalized_words(span_text: str) -> List[str]:
 
 def _corrected_entity_type(span_text: str, entity_type: str) -> str:
     words = _normalized_words(span_text)
-    if words and words[0].lower() in _ADMIN_UNIT_PREFIXES:
-        return "LOCATION"
+    for n in range(min(_ADMIN_UNIT_PREFIX_MAX_WORDS, len(words)), 0, -1):
+        if " ".join(w.lower() for w in words[:n]) in _ADMIN_UNIT_PREFIXES:
+            return "LOCATION"
     return entity_type
 
 
