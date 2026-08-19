@@ -6,3 +6,4 @@ test_saas.db
 .env
 *.egg-info/
 .pytest_cache/
+thongtin.md
