@@ -20,7 +20,7 @@ built and tuned against real documents, not synthetic examples alone — see
 Known Limitations for what's still imperfect and why, and the "Why it's
 built this way" sections below for what was tried and rejected along the way.
 
-Status: **working local MVP** — 56/56 automated tests passing, tested end to
+Status: **working local MVP** — 58/58 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls) and inside a built Docker
 image. Scoped to local use, not deployed publicly.
 
@@ -314,10 +314,18 @@ few-shot examples — no other code changes needed, same story as
 Two things worth knowing:
 - **Scores are a fixed placeholder** (`0.6`) — langextract doesn't produce a
   Presidio-style calibrated confidence, unlike every regex-based category.
-- **`anonymize=true` doesn't mask deep-scan hits** — the anonymizer only
-  understands Presidio's own `RecognizerResult`, not langextract output.
-  Deep-scan entities appear in `detected_entities` for visibility but aren't
-  included in `anonymized_content`.
+- **`anonymize=true` masks `ORGANIZATION` from deep scan, not
+  `HR_SENSITIVE_CONTENT`/`IP_TRADE_SECRET_CONTENT`.** `ORGANIZATION` is a
+  specific value (a company name) — `app/scanning.py` converts it back to a
+  `RecognizerResult` and feeds it into `AnonymizerEngine` alongside the
+  regex/NER hits, from the same final deduped entity list `detected_entities`
+  reports (so what gets masked always matches what gets reported). The other
+  two are deliberately excluded: they flag a whole sentence's *topic*, not a
+  value to redact, and `AnonymizerEngine` resolves overlapping spans by
+  letting the wider one win (verified directly) — including them would
+  silently swallow a real `PHONE_NUMBER` or similar mentioned inside the
+  flagged sentence into one opaque `<HR_SENSITIVE_CONTENT>` tag, destroying
+  the sentence structure for no benefit.
 
 Per-key usage is capped (`MAX_DEEP_SCAN_PER_KEY = 50` in `app/pages.py`,
 lifetime not daily-rolling — the simplest guard against one client draining
@@ -725,7 +733,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                56 tests total: detection (positive/negative/ambiguous),
+tests/                58 tests total: detection (positive/negative/ambiguous),
                       file-upload, OCR fallback, deep-scan (incl. retry),
                       VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage

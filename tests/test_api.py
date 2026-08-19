@@ -465,6 +465,65 @@ def test_deep_scan_overlap_dedup_does_not_drop_unrelated_nested_entities(
     assert ("PHONE_NUMBER", "0912345678") in entities
 
 
+def test_anonymize_masks_deep_scan_organization(client, api_key, monkeypatch):
+    # anonymize=true used to only mask the free regex/NER path -- deep
+    # scan's ORGANIZATION now feeds into it too, converted back to a
+    # RecognizerResult since that's what AnonymizerEngine understands.
+    text = "đại diện Công ty Cổ phần Đầu Tư Toàn Cầu."
+
+    def _fake(text, model_id=None):
+        idx = text.index("Công ty")
+        entity = DetectedEntity(
+            entity_type="ORGANIZATION",
+            location=EntityLocation(start=idx, end=idx + len("Công ty Cổ phần Đầu Tư Toàn Cầu")),
+            text_val="Công ty Cổ phần Đầu Tư Toàn Cầu",
+            score=0.6,
+            context_snippet=text,
+        )
+        return [entity], "ok"
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _fake)
+    resp = client.post(
+        "/api/v1/scan",
+        json={"text": text, "deep_scan": True, "anonymize": True, "confidence_threshold": 0.3},
+        headers={"X-API-Key": api_key},
+    )
+    anonymized = resp.json()["anonymized_content"]["text"]
+    assert "Công ty Cổ phần Đầu Tư Toàn Cầu" not in anonymized
+    assert "<ORGANIZATION>" in anonymized
+
+
+def test_anonymize_does_not_swallow_sentence_around_hr_sensitive_content(
+    client, api_key, monkeypatch
+):
+    # HR_SENSITIVE_CONTENT/IP_TRADE_SECRET_CONTENT flag a whole sentence's
+    # topic, not a specific value -- must not be fed into AnonymizerEngine,
+    # which resolves overlapping spans by letting the wider one win
+    # (verified directly): including this would silently swallow the real
+    # PHONE_NUMBER mentioned inside it into one opaque
+    # "<HR_SENSITIVE_CONTENT>" tag, destroying the sentence structure.
+    text = "Nhân viên bị khiển trách do vi phạm, SĐT liên hệ 0912345678."
+
+    def _fake(text, model_id=None):
+        entity = DetectedEntity(
+            entity_type="HR_SENSITIVE_CONTENT",
+            location=EntityLocation(start=0, end=len(text)),
+            text_val=text,
+            score=0.6,
+            context_snippet=text,
+        )
+        return [entity], "ok"
+
+    monkeypatch.setattr("app.scanning.run_deep_scan", _fake)
+    resp = client.post(
+        "/api/v1/scan",
+        json={"text": text, "deep_scan": True, "anonymize": True, "confidence_threshold": 0.3},
+        headers={"X-API-Key": api_key},
+    )
+    anonymized = resp.json()["anonymized_content"]["text"]
+    assert anonymized == "Nhân viên bị khiển trách do vi phạm, SĐT liên hệ <PHONE_NUMBER>."
+
+
 def test_deep_scan_failure_falls_back_to_regex_results(client, api_key, monkeypatch):
     monkeypatch.setattr("app.scanning.run_deep_scan", lambda text, model_id=None: ([], "skipped_error"))
     resp = client.post(

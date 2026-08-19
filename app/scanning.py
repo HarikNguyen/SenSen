@@ -7,7 +7,7 @@ upload) in main.py so the two entry points can never drift in behavior.
 from typing import Optional
 
 from fastapi import HTTPException
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
 
 from app.deep_scan import run_deep_scan
@@ -60,6 +60,12 @@ def _drop_lower_scored_exact_duplicates(results: list) -> list:
 # inside it -- those are genuinely separate findings, not competing spans
 # for the same value, and must never be dropped just for falling inside one.
 _DEEP_SCAN_OVERLAP_TYPES = {"ORGANIZATION", "PERSON", "LOCATION"}
+
+# Deep-scan categories that flag a whole sentence's *topic* rather than
+# extract a specific value -- see anonymize's construction in run_scan()
+# below for why these are excluded from masking rather than replaced with
+# a tag like everything else.
+_ANONYMIZE_EXCLUDED_TYPES = {"HR_SENSITIVE_CONTENT", "IP_TRADE_SECRET_CONTENT"}
 
 
 def _drop_regex_ner_entities_overlapped_by_deep_scan(
@@ -144,13 +150,33 @@ def run_scan(
         entities = _drop_regex_ner_entities_overlapped_by_deep_scan(entities, deep_entities)
         entities.extend(deep_entities)
         entities.sort(key=lambda e: e.location.start)
-        # Note: deep_entities are not passed through anonymizer.anonymize()
-        # below — that only understands Presidio's own RecognizerResult, not
-        # langextract output. anonymize=true masks regex-found spans only.
 
     anonymized_content = None
     if anonymize:
-        anon_result = anonymizer.anonymize(text=text, analyzer_results=results)
+        # Built from the final, already-deduped `entities` list (not the
+        # raw regex/NER `results`) so masking always matches exactly what
+        # detected_entities reports -- including deep-scan's ORGANIZATION,
+        # converted back to a RecognizerResult since that's what
+        # AnonymizerEngine understands. HR_SENSITIVE_CONTENT/
+        # IP_TRADE_SECRET_CONTENT are excluded on purpose: those flag a
+        # whole sentence's topic, not a specific value to redact, and
+        # AnonymizerEngine resolves overlaps by letting the wider span win
+        # (verified directly) -- including them would silently swallow a
+        # real PHONE_NUMBER or similar nested inside the flagged sentence
+        # into one opaque `<HR_SENSITIVE_CONTENT>` tag, destroying the
+        # sentence structure for no benefit (the topic flag itself isn't
+        # identifying information that needs masking).
+        anonymize_results = [
+            RecognizerResult(
+                entity_type=e.entity_type,
+                start=e.location.start,
+                end=e.location.end,
+                score=e.score,
+            )
+            for e in entities
+            if e.entity_type not in _ANONYMIZE_EXCLUDED_TYPES
+        ]
+        anon_result = anonymizer.anonymize(text=text, analyzer_results=anonymize_results)
         anonymized_content = AnonymizedContent(text=anon_result.text)
 
     return ScanResponse(
