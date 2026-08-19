@@ -588,6 +588,42 @@ def test_vietnamese_ner_bullet_initial_common_word_filtered_at_normal_threshold(
     assert not noise, f"unexpected NER hits: {noise}"
 
 
+def test_name_split_across_newline_by_underthesea_still_recovered(scan):
+    # Real finding from a two-column-layout test document: underthesea's
+    # own tokenizer doesn't treat "\n" as a boundary, so it sometimes fuses
+    # a real name with the next line's label word into one token (here,
+    # "Trần Thị Hoa" + "Số" from the next line's "Số CCCD:"). The fused
+    # token then failed exact-substring lookup against the source text
+    # (which has a newline, not a space, between them), silently dropping
+    # the whole entity -- app/vi_ner.py's _find_token() now falls back to
+    # whitespace-flexible matching, and _split_on_newlines() then scores
+    # each line's piece on its own merits.
+    resp = scan(
+        "Nhân viên: Trần Thị Hoa\nSố CCCD: 038196045678\nPhòng ban: Kế toán",
+        confidence_threshold=0.3,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    assert ("PERSON", "Trần Thị Hoa") in entities
+
+
+def test_bare_newline_before_single_word_still_penalized_as_sentence_initial(scan):
+    # Regression guard for a bug found while fixing the case above:
+    # _is_sentence_initial used to check text[:start].rstrip()[-1], which
+    # silently strips away the newline itself before checking it, so a
+    # bare line break (no punctuation before it) was never recognized as a
+    # boundary -- only a newline preceded by "." or "-" was. A single
+    # capitalized English word straight after a bare newline (e.g. a
+    # section's "Internal API key:" label) must still be penalized enough
+    # to disappear at a normal operating threshold.
+    resp = scan(
+        "Server config:\nInternal API key: sk-live-51Hh8x9AbCdEfGhIjKlMnOpQrStUvWxYz01234567",
+        confidence_threshold=0.5,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    noise = {(t, v) for t, v in entities if t in ("PERSON", "LOCATION", "ORGANIZATION")}
+    assert not noise, f"unexpected NER hits: {noise}"
+
+
 def test_fused_word_no_longer_falsely_tagged(scan):
     # Some PDF exports drop the space glyph between certain word pairs
     # (verified via raw pymupdf word-box inspection on the real contract

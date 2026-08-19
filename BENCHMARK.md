@@ -4,8 +4,8 @@ Corpus: 75 synthetic enterprise-style documents (mixed VN/EN, repeated from 15 t
 
 | Engine | Mean ms/doc | p95 ms/doc | Total entities | Custom-category hits (of 11 new types) |
 |---|---|---|---|---|
-| Vanilla Presidio (default recognizers only) | 26.77 | 35.65 | 180 | 0 |
-| SenSen (default + 11 custom enterprise categories) | 21.12 | 31.79 | 150 | 85 |
+| Vanilla Presidio (default recognizers only) | 30.85 | 34.93 | 180 | 0 |
+| SenSen (default + 11 custom enterprise categories) | 30.49 | 56.91 | 150 | 85 |
 
 ## Entity type breakdown
 

@@ -19,7 +19,7 @@ built and tuned against real documents, not synthetic examples alone — see
 Known Limitations for what's still imperfect and why, and the "Why it's
 built this way" sections below for what was tried and rejected along the way.
 
-Status: **working local MVP** — 51/51 automated tests passing, tested end to
+Status: **working local MVP** — 53/53 automated tests passing, tested end to
 end over real HTTP (not just unit-level calls) and inside a built Docker
 image. Scoped to local use, not deployed publicly.
 
@@ -408,9 +408,40 @@ follow-up once actual usage is observed).
   *no* organization span at all for these names in isolation, leaving
   nothing to type-correct. Documented as a permanent known limitation
   rather than shipping a regex that trades a rare wrong-type bug for a more
-  frequent wrong-boundary one. `"Tên\nNguyễn Xuân Hùng"` (a label word
-  glued to a real name across a signature-block newline) is the same class
-  of low-value, high-effort residual — left as-is.
+  frequent wrong-boundary one.
+
+  Sixth round, found by testing a two-column-layout document (a realistic
+  "hard" scenario, requested explicitly instead of more synthetic
+  corruption tests) — this turned out to explain the `"Tên\nNguyễn Xuân
+  Hùng"` case from round three too, not just a new one. Root cause:
+  underthesea's own tokenizer doesn't treat `"\n"` as a boundary, so it
+  sometimes fuses a real name with the next line's label word into one
+  token (`"Trần Thị Hoa"` + the next line's `"Số"` from `"Số CCCD:"`, one
+  fused token). The fused token then failed the exact-substring lookup that
+  maps it back to character offsets — the source text has a newline where
+  the token has a plain space — silently dropping the *entire* entity with
+  no error, losing a real name completely rather than just mis-scoring it.
+  Fixed in two parts, both in `app/vi_ner.py`: `_find_token()` falls back
+  to whitespace-flexible matching when the exact substring isn't found, and
+  `_split_on_newlines()` then scores each newline-delimited piece of a
+  recovered span independently, so `"Trần Thị Hoa"` is judged on its own
+  merits instead of as part of a `"Trần Thị Hoa Số CCCD"` blob that fails
+  the Title Case check as a whole. Fixing this then *surfaced* a second,
+  older latent bug rather than introducing one: `_is_sentence_initial`
+  checked `text[:start].rstrip()[-1]`, which silently strips the newline
+  itself before checking it, so a bare line break with no punctuation
+  before it (the common case — most lines in these documents don't end in
+  a period) was never actually recognized as sentence-initial, only a
+  newline preceded by `.`/`-` was. Previously invisible because the first
+  bug above was dropping the affected spans entirely; once real spans
+  started reaching the scorer, single English label words placed right
+  after a bare newline (`"Internal API key:"`, `"Email liên hệ:"`) stopped
+  getting the sentence-initial penalty and started passing the default
+  0.5 threshold. Fixed by walking back over whitespace to find the actual
+  boundary instead of `.rstrip()`-ing it away first. Verified against every
+  real document gathered across this whole fix (`hopdong.pdf`,
+  `sample_corpus/full_coverage_demo.txt`, the rest of `sample_corpus/`):
+  real names recovered, no new noise introduced by either fix.
 - **OCR (local Tesseract, not a cloud service).** Scanned/image PDFs go
   through `pytesseract` + the system `tesseract-ocr`/`tesseract-ocr-vie`
   packages (`app/extract.py`) instead of raising a 422 — chosen over Azure
@@ -657,7 +688,7 @@ app/
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
 static/index.html     Minimal demo console (paste text, see highlighted hits)
-tests/                51 tests total: detection (positive/negative/ambiguous),
+tests/                53 tests total: detection (positive/negative/ambiguous),
                       file-upload, OCR fallback, deep-scan (incl. retry),
                       VN phone/ID/NER fixes, auth
 scripts/benchmark.py       Vanilla Presidio vs. this registry, speed + coverage

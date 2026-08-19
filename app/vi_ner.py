@@ -107,7 +107,9 @@ _STRIP_CHARS = string.punctuation + "—–“”\"'"
 # ":" deliberately excluded — "Label: Value" (e.g. "Ông/Bà: Nguyễn Xuân Hùng")
 # is the single most common place a real name appears in these documents, so
 # treating a colon as a sentence boundary penalized exactly the wrong cases.
-_SENTENCE_BOUNDARY_CHARS = ".-—–\n"
+# A bare newline is its own boundary signal, handled separately in
+# _is_sentence_initial (walks back over whitespace) rather than listed here.
+_SENTENCE_BOUNDARY_CHARS = ".-—–"
 
 # Reuses underthesea's own bundled word list as a syllable-frequency source
 # instead of shipping a second Vietnamese dictionary — see module docstring.
@@ -165,8 +167,67 @@ def _corrected_entity_type(span_text: str, entity_type: str) -> str:
 
 
 def _is_sentence_initial(text: str, start: int) -> bool:
-    prefix = text[:start].rstrip()
-    return not prefix or prefix[-1] in _SENTENCE_BOUNDARY_CHARS
+    """True if `start` begins a new sentence/line/bullet.
+
+    Walks back over whitespace first rather than a plain .rstrip(), which
+    silently ate the newline itself before checking it — found via the
+    newline-splitting fix above surfacing spans that used to be hidden by
+    a different bug: "tài khoản\\nEmail" split into "tài khoản" (correctly
+    rejected) and "Email" (a bare newline before it should mean
+    sentence-initial, but .rstrip("...khoản\\n") -> "...khoản", and "n" is
+    not a boundary char, so the newline's own signal was lost). Crossing
+    any newline while walking back over whitespace counts as a boundary on
+    its own; otherwise the last non-whitespace char is checked as before.
+    """
+    i = start
+    saw_newline = False
+    while i > 0 and text[i - 1].isspace():
+        if text[i - 1] == "\n":
+            saw_newline = True
+        i -= 1
+    if saw_newline or i == 0:
+        return True
+    return text[i - 1] in _SENTENCE_BOUNDARY_CHARS
+
+
+def _find_token(text: str, word: str, cursor: int) -> Optional[tuple]:
+    """Locate `word` in `text` starting from `cursor`, returning (start, end).
+
+    Exact substring match first (fast path, matches originally); falls back
+    to treating spaces in `word` as "any run of whitespace" — found via a
+    two-column-layout test: underthesea's own tokenizer sometimes returns a
+    multi-syllable token with a plain space where the source text actually
+    had a newline (real names spanning two logical lines get merged with
+    the next line's content this way), so an exact-substring search
+    silently failed and dropped the whole entity with no error. This is the
+    root cause _split_on_newlines() below was written to work around, but
+    that fix only helps once a span is actually found here.
+    """
+    idx = text.find(word, cursor)
+    if idx != -1:
+        return idx, idx + len(word)
+    if " " in word:
+        pattern = re.escape(word).replace(r"\ ", r"\s+")
+        m = re.compile(pattern).search(text, cursor)
+        if m:
+            return m.start(), m.end()
+    return None
+
+
+def _split_on_newlines(text: str, start: int, end: int) -> List[tuple]:
+    """Yield (sub_start, sub_end) for each newline-delimited piece of
+    text[start:end] — see the call site in analyze() for why this exists.
+    """
+    pieces = []
+    chunk_start = start
+    for i in range(start, end):
+        if text[i] == "\n":
+            if i > chunk_start:
+                pieces.append((chunk_start, i))
+            chunk_start = i + 1
+    if end > chunk_start:
+        pieces.append((chunk_start, end))
+    return pieces
 
 
 def _score_entity(span_text: str, sentence_initial: bool, freq: dict) -> float:
@@ -359,17 +420,31 @@ class VietnameseNerRecognizer(EntityRecognizer):
             entity_type = _corrected_entity_type(expanded_text[start:end], raw_entity_type)
             if entity_type not in entities:
                 continue
-            sentence_initial = _is_sentence_initial(expanded_text, start)
-            score = _score_entity(expanded_text[start:end], sentence_initial, freq)
-            if score <= 0.0:
-                continue
-            mapped = _map_span_to_original(start, end, mapping)
-            if mapped is None:
-                continue
-            orig_start, orig_end = mapped
-            results.append(
-                RecognizerResult(entity_type=entity_type, start=orig_start, end=orig_end, score=score)
-            )
+            # Split on newlines before scoring: underthesea's own tokenizer
+            # doesn't treat "\n" as a boundary, so it sometimes fuses a real
+            # name with the next line's label word into one token — found
+            # via a two-column-layout test document ("Trần Thị Hoa" fused
+            # with the next line's "Số CCCD" into one span, which then
+            # failed the Title Case check as a whole because "CCCD" is
+            # all-caps, losing the real name entirely). Scoring each
+            # newline-delimited piece independently recovers "Trần Thị Hoa"
+            # on its own merits and still rejects "Số CCCD" on its own —
+            # also fixes the same underlying issue in the already-documented
+            # "Tên\nNguyễn Xuân Hùng" case from earlier in this project.
+            for sub_start, sub_end in _split_on_newlines(expanded_text, start, end):
+                sentence_initial = _is_sentence_initial(expanded_text, sub_start)
+                score = _score_entity(expanded_text[sub_start:sub_end], sentence_initial, freq)
+                if score <= 0.0:
+                    continue
+                mapped = _map_span_to_original(sub_start, sub_end, mapping)
+                if mapped is None:
+                    continue
+                orig_start, orig_end = mapped
+                results.append(
+                    RecognizerResult(
+                        entity_type=entity_type, start=orig_start, end=orig_end, score=score
+                    )
+                )
         return results
 
     @staticmethod
@@ -377,18 +452,18 @@ class VietnameseNerRecognizer(EntityRecognizer):
         """(word, pos, chunk, bio_tag) tuples -> [(start, end, entity_type), ...].
 
         Searches forward from a cursor so repeated words align to their
-        correct (not first) occurrence; skips a token if it can't be found
-        (should be rare — underthesea tokens are substrings of the input).
+        correct (not first) occurrence; skips a token if it still can't be
+        found even with whitespace-flexible matching (see _find_token).
         """
         spans = []
         cursor = 0
         current: Optional[list] = None  # [start, end, entity_type]
 
         for word, _pos, _chunk, tag in tagged:
-            idx = text.find(word, cursor)
-            if idx == -1:
+            found = _find_token(text, word, cursor)
+            if found is None:
                 continue
-            start, end = idx, idx + len(word)
+            start, end = found
             cursor = end
 
             bio, _, tag_type = tag.partition("-")
