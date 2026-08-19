@@ -44,7 +44,7 @@ def iter_corpus_files(directory: Path):
 def assess_document(path: Path, analyzer) -> dict:
     raw = path.read_bytes()
     try:
-        text, file_type, total_pages = extract_text(path.name, raw)
+        text, file_type, total_pages, _processing_mode = extract_text(path.name, raw)
     except UnsupportedFileType as exc:
         return {"file": path.name, "error": str(exc)}
 

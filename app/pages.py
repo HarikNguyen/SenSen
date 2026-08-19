@@ -114,14 +114,12 @@ async def scan_file(
     analyzer: AnalyzerEngine = Depends(get_analyzer),
     anonymizer: AnonymizerEngine = Depends(get_anonymizer),
 ):
-    """Upload a .pdf (digital text layer), .docx or .txt file to scan.
-
-    No OCR in this MVP — scanned/image PDFs raise a 422 pointing at the
-    Azure Document Intelligence roadmap item in README.md.
+    """Upload a .pdf (digital text or scanned via local Tesseract OCR),
+    .docx or .txt file to scan.
     """
     raw = await file.read()
     try:
-        text, file_type, total_pages = extract_text(file.filename, raw)
+        text, file_type, total_pages, processing_mode = extract_text(file.filename, raw)
     except UnsupportedFileType as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -137,7 +135,7 @@ async def scan_file(
         deep_scan_model=model,
         file_name=file.filename,
         file_type=file_type,
-        processing_mode="direct_text_extraction",
+        processing_mode=processing_mode,
         total_pages=total_pages,
     )
     if deep_scan and not allowed:

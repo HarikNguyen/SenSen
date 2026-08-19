@@ -121,6 +121,42 @@ _MULTI_WORD_BONUS = 0.15
 _SINGLE_WORD_COMMON_WORD_PENALTY = 0.25
 _SENTENCE_INITIAL_PENALTY = 0.1
 
+# Fifth round: 2 of the 3 remaining type-confusion cases turned out to be
+# fixable after all with a small, fully-enumerable gazetteer, once re-tested
+# with the same "add a signal" approach that fixed the single-word noise
+# above. Both verified against real documents before adding.
+#
+# Vietnamese day names are a closed set of exactly 7 — confirmed these get
+# tagged LOCATION ("Chủ Nhật", "Thứ Bảy" in a real labor contract's benefits
+# section). A day name is never itself PII, so this is a flat rejection
+# (score 0), not a type correction.
+_CALENDAR_TERMS = {
+    "thứ hai", "thứ ba", "thứ tư", "thứ năm", "thứ sáu", "thứ bảy", "chủ nhật",
+}
+
+# Vietnamese administrative-unit prefixes as the *first word of an
+# already-bounded span* are a reliable LOCATION signal — confirmed
+# underthesea gets the boundary right ("Phường Thủ Thiêm") but the type
+# wrong (tagged PERSON) in a real document. Type-only correction: never
+# touches the span boundary, so it carries none of the over-matching risk
+# found when a similar idea was tried for company names (see module
+# docstring) — that one was rejected, this one is narrow and verified safe.
+_ADMIN_UNIT_PREFIXES = {
+    "phường", "quận", "huyện", "tỉnh", "xã", "thị trấn", "thành phố",
+}
+
+
+def _normalized_words(span_text: str) -> List[str]:
+    words = [w.strip(_STRIP_CHARS) for w in span_text.split()]
+    return [w for w in words if w]
+
+
+def _corrected_entity_type(span_text: str, entity_type: str) -> str:
+    words = _normalized_words(span_text)
+    if words and words[0].lower() in _ADMIN_UNIT_PREFIXES:
+        return "LOCATION"
+    return entity_type
+
 
 def _is_sentence_initial(text: str, start: int) -> bool:
     prefix = text[:start].rstrip()
@@ -135,10 +171,11 @@ def _score_entity(span_text: str, sentence_initial: bool, freq: dict) -> float:
     """
     if any(ch.isdigit() for ch in span_text):
         return 0.0
-    words = [w.strip(_STRIP_CHARS) for w in span_text.split()]
-    words = [w for w in words if w]
+    words = _normalized_words(span_text)
     if not words or not all(len(w) >= 2 and w.istitle() for w in words):
         return 0.0  # not ambiguous: headers/secrets/figures aren't names at all
+    if " ".join(w.lower() for w in words) in _CALENDAR_TERMS:
+        return 0.0  # a day name is never itself PII
 
     score = _BASE_SCORE
     if len(words) >= 2:
@@ -308,7 +345,12 @@ class VietnameseNerRecognizer(EntityRecognizer):
         freq = _load_syllable_freq()
         spans = self._align_and_merge(expanded_text, tagged)
         results = []
-        for start, end, entity_type in spans:
+        for start, end, raw_entity_type in spans:
+            # Correction happens before the entities filter below: a span
+            # underthesea mistyped as PERSON but that a gazetteer identifies
+            # as LOCATION must still surface when the caller asked for
+            # LOCATION, even if they didn't ask for PERSON.
+            entity_type = _corrected_entity_type(expanded_text[start:end], raw_entity_type)
             if entity_type not in entities:
                 continue
             sentence_initial = _is_sentence_initial(expanded_text, start)

@@ -16,22 +16,23 @@ code changes needed — same story as app/recognizers/recognizers.yaml):
   - HR_SENSITIVE_CONTENT: performance-review / disciplinary content, which
     has no regex-detectable shape at all.
 
-Known bug, found by testing against sample_corpus/full_coverage_demo.txt
-(not something app/deep_scan.py itself can fix): langextract 1.6.0's Gemini
-provider intermittently raises a pydantic ValidationError building its
-response_schema ("Extra inputs are not permitted" on type/properties/
-required) — looks like a version mismatch between langextract's schema
-construction and the installed google-genai SDK, and it's a race, not
-deterministic: the exact same call failed once then succeeded on immediate
-retry with the same text/model/key. `run_deep_scan`'s existing try/except
-already degrades safely (returns "skipped_error", caller falls back to
-regex-only results) — that behavior is correct as-is; not adding an
-automatic retry here since it would silently double Gemini quota spend on
-every occurrence without the caller asking for it. Both langextract (1.6.0)
-and google-genai (2.18.1) were already at their latest release when this was
-found (checked via `pip index versions`), so there's no upstream fix to pull
-in yet — this is a genuinely open bug in the pinned dependency, not
-something this codebase is behind on.
+Known bug, found by testing against sample_corpus/full_coverage_demo.txt:
+langextract 1.6.0's Gemini provider intermittently raises a pydantic
+ValidationError building its response_schema ("Extra inputs are not
+permitted" on type/properties/required) — looks like a version mismatch
+between langextract's schema construction and the installed google-genai
+SDK, and it's a race, not deterministic: the exact same call failed once
+then succeeded on immediate retry with the same text/model/key. Both
+langextract (1.6.0) and google-genai (2.18.1) were already at their latest
+release when this was found (checked via `pip index versions`), so there
+was no upstream fix to pull in — this is a genuinely open bug in the pinned
+dependency, not something this codebase was behind on. First response was
+to just degrade safely and document it (a transient failure shouldn't be
+silently retried without being asked); once "deep scan cần phải fix" became
+an explicit requirement, `run_deep_scan` now retries once
+(`_MAX_ATTEMPTS = 2`) before reporting `"skipped_error"` — a bounded,
+logged retry rather than an unbounded one, so a real outage still surfaces
+instead of retrying forever.
 """
 
 import logging
@@ -66,6 +67,12 @@ _EXCLUDED_MODEL_SUBSTRINGS = (
 # this is a fixed placeholder until real precision/recall data justifies
 # something more granular.
 DEEP_SCAN_SCORE = 0.6
+
+# Retries the known intermittent langextract schema-validation race (see
+# module docstring) once before giving up — verified this is a real race,
+# not a deterministic failure: the identical call failed once and succeeded
+# on immediate retry with the same text/model/key.
+_MAX_ATTEMPTS = 2
 
 PROMPT_DESCRIPTION = (
     "Identify sentences or clauses that disclose a company trade secret "
@@ -203,18 +210,31 @@ def run_deep_scan(text: str, model_id: Optional[str] = None) -> tuple[list[Detec
         logger.warning("deep_scan: rejected unusable model override %r", model_id)
         return [], "skipped_error"
 
-    try:
-        result = lx.extract(
-            text_or_documents=text,
-            prompt_description=PROMPT_DESCRIPTION,
-            examples=EXAMPLES,
-            model_id=model_id,
-            api_key=api_key,
-            show_progress=False,
-        )
-    except Exception:
-        logger.warning("deep_scan: langextract call failed", exc_info=True)
-        return [], "skipped_error"
+    result = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            result = lx.extract(
+                text_or_documents=text,
+                prompt_description=PROMPT_DESCRIPTION,
+                examples=EXAMPLES,
+                model_id=model_id,
+                api_key=api_key,
+                show_progress=False,
+            )
+            break
+        except Exception:
+            if attempt < _MAX_ATTEMPTS:
+                logger.warning(
+                    "deep_scan: langextract call failed on attempt %d/%d, retrying "
+                    "(known intermittent schema-validation race — see module docstring)",
+                    attempt, _MAX_ATTEMPTS, exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "deep_scan: langextract call failed on final attempt %d/%d",
+                    attempt, _MAX_ATTEMPTS, exc_info=True,
+                )
+                return [], "skipped_error"
 
     entities = []
     for extraction in result.extractions:

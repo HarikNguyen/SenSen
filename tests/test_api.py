@@ -177,6 +177,78 @@ def test_scan_unsupported_file_type_rejected(client, api_key):
     assert resp.status_code == 422
 
 
+def _build_image_only_pdf(num_pages: int = 1) -> bytes:
+    # A page with only an inserted image, no text layer -- same shape as a
+    # real scanned document, exercises app/extract.py's OCR fallback path.
+    src = pymupdf.open()
+    src.new_page(width=200, height=100)
+    pix = src[0].get_pixmap()
+    img_bytes = pix.tobytes("png")
+    src.close()
+
+    out = pymupdf.open()
+    for _ in range(num_pages):
+        page = out.new_page(width=pix.width, height=pix.height)
+        page.insert_image(page.rect, stream=img_bytes)
+    raw = out.tobytes()
+    out.close()
+    return raw
+
+
+def test_scanned_pdf_falls_back_to_ocr(client, api_key, monkeypatch):
+    monkeypatch.setattr(
+        "app.extract.pytesseract.image_to_string",
+        lambda img, lang=None: "Hợp đồng số HD-2026-7777",
+    )
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["document_metadata"]["processing_mode"] == "ocr"
+    assert "CONTRACT_ID" in entity_types(resp)
+
+
+def test_scanned_pdf_without_tesseract_installed_gives_clear_422(client, api_key, monkeypatch):
+    import pytesseract
+
+    def _raise_not_found(img, lang=None):
+        raise pytesseract.TesseractNotFoundError()
+
+    monkeypatch.setattr("app.extract.pytesseract.image_to_string", _raise_not_found)
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "tesseract" in resp.json()["detail"].lower()
+
+
+def test_scanned_pdf_over_page_limit_rejected_before_ocr_attempt(client, api_key, monkeypatch):
+    from app.extract import MAX_OCR_PAGES
+
+    def _boom(img, lang=None):
+        raise AssertionError("OCR must not run once the page-count cap is exceeded")
+
+    monkeypatch.setattr("app.extract.pytesseract.image_to_string", _boom)
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={
+            "file": (
+                "scanned.pdf",
+                _build_image_only_pdf(num_pages=MAX_OCR_PAGES + 1),
+                "application/pdf",
+            )
+        },
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert str(MAX_OCR_PAGES) in resp.json()["detail"]
+
+
 # ---------------------------------------------------- round 2 categories ----
 
 
@@ -295,6 +367,49 @@ def test_deep_scan_quota_exceeded_after_cap(client, monkeypatch):
         "/api/v1/scan", json={"text": "hello", "deep_scan": True}, headers={"X-API-Key": key}
     )
     assert resp.json()["deep_scan_status"] == "skipped_quota_exceeded"
+
+
+def test_run_deep_scan_retries_once_on_langextract_race_then_succeeds(monkeypatch):
+    # Unit-level test of app.deep_scan.run_deep_scan itself (not the
+    # app.scanning wrapper) -- exercises the retry loop, not the fallback
+    # behavior around it. Simulates the real bug found in this codebase:
+    # langextract's Gemini provider intermittently raises on schema
+    # validation, then succeeds on immediate retry with identical inputs.
+    from app import deep_scan
+
+    calls = {"n": 0}
+
+    def flaky_extract(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated langextract schema-validation race")
+
+        class FakeResult:
+            extractions = []
+
+        return FakeResult()
+
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key")
+    monkeypatch.setattr(deep_scan.lx, "extract", flaky_extract)
+    entities, status = deep_scan.run_deep_scan("some text")
+    assert status == "ok"
+    assert calls["n"] == 2
+
+
+def test_run_deep_scan_gives_up_after_max_attempts(monkeypatch):
+    from app import deep_scan
+
+    calls = {"n": 0}
+
+    def always_fails(**kwargs):
+        calls["n"] += 1
+        raise RuntimeError("simulated permanent langextract failure")
+
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key")
+    monkeypatch.setattr(deep_scan.lx, "extract", always_fails)
+    entities, status = deep_scan.run_deep_scan("some text")
+    assert status == "skipped_error"
+    assert calls["n"] == deep_scan._MAX_ATTEMPTS
 
 
 def test_deep_scan_model_override_passed_through(client, api_key, monkeypatch):
@@ -462,6 +577,34 @@ def test_vietnamese_ner_no_hallucination_on_fragment_only_text(scan):
         confidence_threshold=0.3,
     )
     assert not (entity_types(resp) & {"PERSON", "ORGANIZATION", "LOCATION"})
+
+
+def test_vietnamese_day_names_rejected_not_tagged_location(scan):
+    # Real finding from a labor contract's benefits section: "Thứ Bảy",
+    # "Chủ Nhật" (Saturday, Sunday) were getting tagged LOCATION. Day names
+    # are a closed set of 7 and never PII -- rejected outright, not merely
+    # down-scored.
+    resp = scan(
+        "Nghỉ hàng tuần 02 ngày (Thứ Bảy, Chủ Nhật); nghỉ phép năm 12 ngày.",
+        confidence_threshold=0.1,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    noise = {(t, v) for t, v in entities if t in ("PERSON", "LOCATION", "ORGANIZATION")}
+    assert not noise, f"day names should never be tagged as entities: {noise}"
+
+
+def test_admin_unit_prefix_corrects_type_to_location(scan):
+    # Real finding: underthesea gets the span boundary right ("Phường Thủ
+    # Thiêm") but the type wrong (tagged PERSON). "Phường" is a reliable
+    # administrative-unit signal -- corrected to LOCATION without touching
+    # the span itself.
+    resp = scan(
+        "Địa chỉ: 93A/51/223 Ngô Gia Tự, Phường Thủ Thiêm, TP. Hồ Chí Minh.",
+        confidence_threshold=0.3,
+    )
+    entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
+    assert ("LOCATION", "Phường Thủ Thiêm") in entities
+    assert ("PERSON", "Phường Thủ Thiêm") not in entities
 
 
 def test_tax_code_context_outscores_bare_digits(scan):
