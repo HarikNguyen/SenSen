@@ -6,16 +6,19 @@
 <title>SenSen — Sensitive Data Classifier</title>
 <style>
   :root {
-    --bg: #0f1117;
-    --panel: #171a23;
-    --border: #2a2e3a;
-    --text: #e6e8ee;
-    --muted: #8a8fa3;
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --panel-2: #171b24;
+    --border: #262b38;
+    --text: #e8eaf0;
+    --muted: #8992a6;
     --accent: #6ea8ff;
-    --accent-soft: rgba(110,168,255,0.15);
-    --danger: #ff6e6e;
+    --accent-2: #7ee0c3;
+    --accent-soft: rgba(110,168,255,0.14);
+    --danger: #ff7a7a;
     --ok: #5fd6a0;
-    --mono: "SF Mono", Consolas, Menlo, monospace;
+    --warn: #e0c25f;
+    --mono: "SF Mono", Consolas, "Cascadia Code", Menlo, monospace;
   }
   * { box-sizing: border-box; }
   body {
@@ -25,33 +28,44 @@
     color: var(--text);
     min-height: 100vh;
   }
+  a { color: var(--accent); }
   header {
-    padding: 24px 32px 16px;
+    padding: 28px 32px 18px;
     border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(110,168,255,0.05), transparent);
   }
-  header h1 { margin: 0 0 4px; font-size: 20px; }
+  .header-inner { max-width: 1180px; margin: 0 auto; display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  header h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: -0.01em; }
   header h1 span { color: var(--accent); }
   header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .feature-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+  .feature-chip {
+    font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 20px; padding: 4px 10px; white-space: nowrap;
+  }
   main {
-    max-width: 1100px;
+    max-width: 1180px;
     margin: 0 auto;
     padding: 24px 32px 64px;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 420px 1fr;
     gap: 20px;
+    align-items: start;
   }
-  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 12px;
     padding: 18px;
   }
-  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+  .panel + .panel { margin-top: 20px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .panel h2 .step { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-  input[type=text], textarea, select {
+  input[type=text], input[type=email], textarea, select {
     width: 100%;
-    background: #0d0f15;
+    background: #0a0c11;
     border: 1px solid var(--border);
     border-radius: 8px;
     color: var(--text);
@@ -60,96 +74,322 @@
     font-family: var(--mono);
     resize: vertical;
   }
-  textarea { min-height: 220px; line-height: 1.5; }
+  input[type=text]:focus, input[type=email]:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  textarea { min-height: 200px; line-height: 1.55; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   .row { margin-bottom: 14px; }
-  .row-inline { display: flex; gap: 12px; align-items: center; }
+  .row:last-child { margin-bottom: 0; }
+  .row-inline { display: flex; gap: 10px; align-items: center; }
+  .row-inline input { flex: 1; }
   button {
     background: var(--accent);
-    color: #0d0f15;
+    color: #0a0c11;
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    white-space: nowrap;
   }
-  button:disabled { opacity: .5; cursor: default; }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .45; cursor: default; filter: none; }
   button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  button.small { padding: 6px 12px; font-size: 12px; }
+  button.full { width: 100%; padding: 12px; font-size: 14px; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+  .checkbox-row input { width: auto; }
+  .key-status { font-size: 11px; margin-top: 6px; min-height: 14px; }
+  .key-status.ok { color: var(--ok); }
+  .key-status.err { color: var(--danger); }
+  details { margin-top: 10px; }
+  summary { font-size: 12px; color: var(--accent); cursor: pointer; user-select: none; }
+  .register-box { margin-top: 10px; padding: 12px; background: var(--panel-2); border-radius: 8px; border: 1px solid var(--border); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; background: var(--panel-2); border-radius: 8px; padding: 4px; }
+  .tab { flex: 1; background: transparent; border: none; color: var(--muted); padding: 8px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .tab.active { background: var(--accent-soft); color: var(--accent); }
+  .file-drop {
+    border: 1.5px dashed var(--border); border-radius: 8px; padding: 28px 14px;
+    text-align: center; color: var(--muted); font-size: 13px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .file-drop:hover, .file-drop.dragover { border-color: var(--accent); background: var(--accent-soft); }
+  .file-drop.has-file { border-color: var(--ok); color: var(--text); }
+  #fileInput { display: none; }
+  .samples { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .slider-row { display: flex; align-items: center; gap: 10px; }
+  .slider-row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .slider-val { font-family: var(--mono); font-size: 12px; color: var(--accent); min-width: 32px; text-align: right; }
+  #status { font-size: 12px; color: var(--muted); margin-top: 12px; min-height: 16px; }
+  #status.error { color: var(--danger); }
+  .stat-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; font-size: 12px; color: var(--muted);
+  }
+  .stat b { color: var(--text); font-size: 14px; display: block; font-family: var(--mono); }
   #highlighted {
     white-space: pre-wrap;
     word-break: break-word;
     font-family: var(--mono);
     font-size: 13px;
-    line-height: 1.6;
-    min-height: 220px;
+    line-height: 1.7;
+    max-height: 340px;
+    overflow-y: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 10px 12px;
-    background: #0d0f15;
+    padding: 14px;
+    background: #0a0c11;
   }
   mark {
-    background: var(--accent-soft);
-    color: var(--accent);
     border-radius: 3px;
-    padding: 0 2px;
+    padding: 1px 3px;
     cursor: help;
+    font-weight: 600;
   }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10px; }
-  .badge { display: inline-block; padding: 1px 8px; border-radius: 20px; font-size: 11px; background: var(--accent-soft); color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; }
+  td.val { font-family: var(--mono); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; letter-spacing: .02em; }
   .score-high { color: var(--ok); }
-  .score-low { color: #e0c25f; }
-  #status { font-size: 12px; color: var(--muted); margin-top: 10px; min-height: 16px; }
-  #status.error { color: var(--danger); }
-  footer { text-align: center; color: var(--muted); font-size: 11px; padding: 20px; }
-  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+  .score-mid { color: var(--warn); }
+  .score-low { color: var(--muted); }
+  h3.section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 20px 0 10px; }
+  footer { text-align: center; color: var(--muted); font-size: 11px; padding: 24px; border-top: 1px solid var(--border); margin-top: 20px; }
+  footer a { color: var(--muted); text-decoration: underline; }
+  .empty { color: var(--muted); font-size: 13px; padding: 40px 0; text-align: center; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite;
+    vertical-align: -2px; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 <header>
-  <h1>Sen<span>Sen</span> — Sensitive Data Classifier</h1>
-  <p>Presidio-powered enterprise sensitive data discovery &amp; classification — demo console</p>
+  <div class="header-inner">
+    <div>
+      <h1>Sen<span>Sen</span> — Sensitive Data Classifier</h1>
+      <p>Presidio-powered · phát hiện dữ liệu nhạy cảm doanh nghiệp cho văn bản tiếng Việt/Anh — demo console</p>
+    </div>
+    <div class="feature-strip">
+      <span class="feature-chip">11 category doanh nghiệp</span>
+      <span class="feature-chip">NER tiếng Việt</span>
+      <span class="feature-chip">OCR local</span>
+      <span class="feature-chip">Deep scan (LLM)</span>
+    </div>
+  </div>
 </header>
 
 <main>
-  <section class="panel">
-    <h2>Đầu vào</h2>
-    <div class="row">
-      <label for="apiKey">X-API-Key</label>
-      <input type="text" id="apiKey" placeholder="dán API key lấy từ /register">
-    </div>
-    <div class="row">
-      <label for="inputText">Văn bản cần quét</label>
-      <textarea id="inputText" placeholder="Dán văn bản hợp đồng, email, báo cáo... vào đây">Hợp đồng số HD-2026-0142 ký giữa Công ty A và ông Nguyễn Văn B (email: nguyenvanb@example.com, SĐT: 0912345678).
+  <div>
+    <section class="panel" id="authPanel">
+      <h2><span class="step">1</span>API Key</h2>
+      <div class="row-inline">
+        <input type="text" id="apiKey" placeholder="Dán key hoặc đăng ký bên dưới">
+      </div>
+      <div class="key-status" id="keyStatus"></div>
+      <details id="registerDetails">
+        <summary>Chưa có key? Đăng ký miễn phí</summary>
+        <div class="register-box">
+          <div class="row-inline">
+            <input type="email" id="registerEmail" placeholder="you@example.com">
+            <button class="secondary small" id="registerBtn">Lấy key</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">2</span>Đầu vào</h2>
+      <div class="tabs">
+        <button class="tab active" data-mode="text" type="button">Dán văn bản</button>
+        <button class="tab" data-mode="file" type="button">Tải file (PDF/DOCX/TXT)</button>
+      </div>
+
+      <div id="textModePanel" class="row">
+        <textarea id="inputText" placeholder="Dán văn bản hợp đồng, email, báo cáo... vào đây">Hợp đồng số HD-2026-0142 ký giữa Công ty A và ông Nguyễn Văn B (email: nguyenvanb@example.com, SĐT: 0912345678).
 Mã số thuế doanh nghiệp: 0312345678.
 API key nội bộ: sk-live-51Hh8x9AbCdEfGhIjKlMnOpQrStUvWxYz01234567
 Database connection string: postgresql://admin:S3cretPass@db.internal:5432/prod
 Điều khoản bồi thường vi phạm NDA quy định mức phạt 50,000,000 VND.</textarea>
-    </div>
-    <div class="row row-inline">
-      <button id="scanBtn">Quét dữ liệu nhạy cảm</button>
-      <label class="checkbox-row"><input type="checkbox" id="anonymize"> Ẩn danh hoá (anonymize)</label>
-      <label class="checkbox-row"><input type="checkbox" id="deepScan"> Deep scan (LLM)</label>
-    </div>
-    <div class="row" id="deepScanModelRow" style="display:none">
-      <label for="deepScanModel">Model (deep scan)</label>
-      <select id="deepScanModel"><option value="">— server default —</option></select>
-      <div id="deepScanModelStatus" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
-    </div>
-    <div id="status"></div>
-  </section>
+        <div class="samples">
+          <button class="secondary small" data-sample="contract" type="button">Mẫu: Hợp đồng</button>
+          <button class="secondary small" data-sample="infra" type="button">Mẫu: Hạ tầng &amp; bí mật</button>
+          <button class="secondary small" data-sample="hr" type="button">Mẫu: Nhân sự</button>
+        </div>
+      </div>
+
+      <div id="fileModePanel" class="row" style="display:none">
+        <div class="file-drop" id="fileDrop">
+          <div id="fileDropLabel">Kéo thả file vào đây, hoặc bấm để chọn<br><span style="font-size:11px">.pdf (kể cả bản scan, tự OCR) · .docx · .txt</span></div>
+          <input type="file" id="fileInput" accept=".pdf,.docx,.txt">
+        </div>
+      </div>
+
+      <div class="row">
+        <label for="threshold">Ngưỡng tin cậy (confidence_threshold)</label>
+        <div class="slider-row">
+          <input type="range" id="threshold" min="0" max="1" step="0.05" value="0.5">
+          <span class="slider-val" id="thresholdVal">0.50</span>
+        </div>
+      </div>
+
+      <div class="row row-inline" style="flex-wrap:wrap">
+        <label class="checkbox-row"><input type="checkbox" id="anonymize"> Ẩn danh hoá</label>
+        <label class="checkbox-row"><input type="checkbox" id="deepScan"> Deep scan (LLM)</label>
+      </div>
+      <div class="row" id="deepScanModelRow" style="display:none">
+        <label for="deepScanModel">Model (deep scan)</label>
+        <select id="deepScanModel"><option value="">— server default —</option></select>
+        <div class="key-status" id="deepScanModelStatus"></div>
+      </div>
+
+      <div class="row">
+        <button class="full" id="scanBtn">Quét dữ liệu nhạy cảm</button>
+      </div>
+      <div id="status"></div>
+    </section>
+  </div>
 
   <section class="panel">
     <h2>Kết quả</h2>
-    <div id="resultArea" class="empty">Chưa có kết quả — nhấn "Quét dữ liệu nhạy cảm" để bắt đầu.</div>
+    <div id="resultArea" class="empty">Chưa có kết quả — nhập API key, chọn đầu vào, rồi nhấn "Quét dữ liệu nhạy cảm".</div>
   </section>
 </main>
 
-<footer>SenSen MVP · Microsoft Presidio + FastAPI · dữ liệu chỉ xử lý trong RAM, không lưu trữ</footer>
+<footer>
+  SenSen MVP · Microsoft Presidio + FastAPI · dữ liệu chỉ xử lý trong RAM, không lưu trữ ·
+  <a href="/docs">Swagger UI</a>
+</footer>
 
 <script>
+const CATEGORY_COLORS = {
+  // PII / chuẩn Presidio
+  EMAIL_ADDRESS: '#6ea8ff', PHONE_NUMBER: '#6ea8ff', URL: '#6ea8ff', IP_ADDRESS: '#6ea8ff',
+  CREDIT_CARD: '#6ea8ff', IBAN_CODE: '#6ea8ff', CRYPTO: '#6ea8ff', MAC_ADDRESS: '#6ea8ff', US_SSN: '#6ea8ff',
+  // Pháp lý / tài chính
+  CONTRACT_ID: '#7ee0c3', INTERNAL_TAX_CODE: '#7ee0c3', FINANCIAL_METRIC: '#7ee0c3', FINANCIAL_CREDENTIAL: '#7ee0c3',
+  // Nhân sự
+  EMPLOYEE_ID: '#c9a3ff', HR_SENSITIVE_CONTENT: '#c9a3ff',
+  // Hạ tầng / bảo mật
+  INFRA_SECRET: '#ff7a7a', CRYPTO_PRIVATE_KEY: '#ff7a7a', INFRA_NETWORK_MAP: '#ff7a7a', IP_SENSITIVE_MARKER: '#ff7a7a',
+  // Sở hữu trí tuệ
+  IP_TRADE_SECRET_CONTENT: '#f0a35f',
+  // Người / địa danh / tổ chức
+  PERSON: '#5fd6c9', LOCATION: '#5fd6c9', ORGANIZATION: '#5fd6c9', GPS_LOCATION: '#5fd6c9',
+  // VN-specific
+  VN_NATIONAL_ID: '#e0c25f',
+};
+const DEFAULT_COLOR = '#8992a6';
+function colorFor(type) { return CATEGORY_COLORS[type] || DEFAULT_COLOR; }
+
+const SAMPLES = {
+  contract: `HỢP ĐỒNG LAO ĐỘNG SỐ HD-2026-3456
+Bên A: Ông Nguyễn Văn Đức, số CCCD 079195012345
+Điện thoại liên hệ: 0938271645
+Địa chỉ: 12 Lê Lợi, Phường Bến Nghé, Quận 1, TP. Hồ Chí Minh
+Mức lương thoả thuận: 15.000.000 đồng/tháng
+Đại diện: Công ty TNHH Thiên Phú`,
+  infra: `Sơ đồ mạng nội bộ: gateway chính tại 10.20.5.1/24, subnet dự phòng 192.168.1.0/24.
+Backup key máy chủ CI/CD:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA1c7z9z5Pad7OejecsQ0bu3aumgIJemALQTOtNz/nq6IUvKtV
+-----END RSA PRIVATE KEY-----
+Mật khẩu ngân hàng của tài khoản công ty là: Xk9pL2qR, chỉ kế toán trưởng được biết.
+Tài liệu này CONFIDENTIAL, chứa source code độc quyền của công ty.`,
+  hr: `Mã nhân viên: NV-00789, họ tên: Trần Văn Bình, chức danh: Kỹ sư hạ tầng.
+Nhân viên Trần Văn Bình đã bị khiển trách bằng văn bản do vi phạm quy định
+bảo mật thông tin khách hàng 2 lần trong quý này, SĐT liên hệ 0912345678.`,
+};
+
+// ------------------------------------------------------------- API key ----
+const apiKeyEl = document.getElementById('apiKey');
+const keyStatusEl = document.getElementById('keyStatus');
+const registerDetails = document.getElementById('registerDetails');
+
+function setApiKey(key, { persist = true } = {}) {
+  apiKeyEl.value = key;
+  if (persist) localStorage.setItem('sensen_api_key', key);
+  if (key) {
+    keyStatusEl.textContent = '✓ đã lưu trên trình duyệt này';
+    keyStatusEl.className = 'key-status ok';
+    registerDetails.open = false;
+  } else {
+    keyStatusEl.textContent = '';
+    keyStatusEl.className = 'key-status';
+  }
+}
+
+const savedKey = localStorage.getItem('sensen_api_key');
+if (savedKey) setApiKey(savedKey, { persist: false });
+
+apiKeyEl.addEventListener('input', () => localStorage.setItem('sensen_api_key', apiKeyEl.value));
+
+document.getElementById('registerBtn').addEventListener('click', async () => {
+  const email = document.getElementById('registerEmail').value.trim();
+  if (!email) { keyStatusEl.textContent = 'Nhập email để đăng ký.'; keyStatusEl.className = 'key-status err'; return; }
+  try {
+    const res = await fetch('/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    setApiKey(data.api_key);
+  } catch (err) {
+    keyStatusEl.textContent = 'Lỗi đăng ký: ' + err.message;
+    keyStatusEl.className = 'key-status err';
+  }
+});
+
+// -------------------------------------------------------- input tabs ----
+const tabs = document.querySelectorAll('.tab');
+const textModePanel = document.getElementById('textModePanel');
+const fileModePanel = document.getElementById('fileModePanel');
+let inputMode = 'text';
+
+tabs.forEach(tab => tab.addEventListener('click', () => {
+  tabs.forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  inputMode = tab.dataset.mode;
+  textModePanel.style.display = inputMode === 'text' ? 'block' : 'none';
+  fileModePanel.style.display = inputMode === 'file' ? 'block' : 'none';
+}));
+
+document.querySelectorAll('[data-sample]').forEach(btn => btn.addEventListener('click', () => {
+  document.getElementById('inputText').value = SAMPLES[btn.dataset.sample];
+}));
+
+// -------------------------------------------------------- file upload ----
+const fileDrop = document.getElementById('fileDrop');
+const fileInput = document.getElementById('fileInput');
+const fileDropLabel = document.getElementById('fileDropLabel');
+let selectedFile = null;
+
+fileDrop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => setSelectedFile(fileInput.files[0]));
+['dragover', 'dragenter'].forEach(evt => fileDrop.addEventListener(evt, e => { e.preventDefault(); fileDrop.classList.add('dragover'); }));
+['dragleave', 'drop'].forEach(evt => fileDrop.addEventListener(evt, e => { e.preventDefault(); fileDrop.classList.remove('dragover'); }));
+fileDrop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) setSelectedFile(e.dataTransfer.files[0]); });
+
+function setSelectedFile(file) {
+  selectedFile = file || null;
+  if (selectedFile) {
+    fileDropLabel.textContent = `📄 ${selectedFile.name} (${(selectedFile.size / 1024).toFixed(1)} KB)`;
+    fileDrop.classList.add('has-file');
+  } else {
+    fileDrop.classList.remove('has-file');
+  }
+}
+
+// -------------------------------------------------------- threshold ----
+const thresholdEl = document.getElementById('threshold');
+const thresholdValEl = document.getElementById('thresholdVal');
+thresholdEl.addEventListener('input', () => thresholdValEl.textContent = parseFloat(thresholdEl.value).toFixed(2));
+
+// -------------------------------------------------------- deep scan ----
 const scanBtn = document.getElementById('scanBtn');
 const statusEl = document.getElementById('status');
 const resultArea = document.getElementById('resultArea');
@@ -161,9 +401,10 @@ const deepScanModelStatusEl = document.getElementById('deepScanModelStatus');
 let modelsLoadedForKey = null;
 
 async function loadDeepScanModels() {
-  const apiKey = document.getElementById('apiKey').value;
+  const apiKey = apiKeyEl.value;
   if (!apiKey || modelsLoadedForKey === apiKey) return;
   deepScanModelStatusEl.textContent = 'Đang tải danh sách model...';
+  deepScanModelStatusEl.className = 'key-status';
   try {
     const res = await fetch('/api/v1/deep_scan/models', { headers: { 'X-API-Key': apiKey } });
     const data = await res.json();
@@ -182,9 +423,11 @@ async function loadDeepScanModels() {
       deepScanModelStatusEl.textContent = 'Không lấy được danh sách model từ Gemini — vẫn có thể dùng server default.';
     } else {
       deepScanModelStatusEl.textContent = `${data.models.length} model khả dụng · mặc định: ${data.default_model}`;
+      deepScanModelStatusEl.className = 'key-status ok';
     }
   } catch (err) {
     deepScanModelStatusEl.textContent = 'Lỗi tải danh sách model: ' + err.message;
+    deepScanModelStatusEl.className = 'key-status err';
   }
 }
 
@@ -193,6 +436,7 @@ deepScanEl.addEventListener('change', () => {
   if (deepScanEl.checked) loadDeepScanModels();
 });
 
+// -------------------------------------------------------- rendering ----
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -203,73 +447,116 @@ function renderHighlighted(text, entities) {
   let cursor = 0;
   for (const e of sorted) {
     const { start, end } = e.location;
-    if (start < cursor) continue;
+    if (start < cursor || start == null) continue;
+    const color = colorFor(e.entity_type);
     out += escapeHtml(text.slice(cursor, start));
-    out += `<mark title="${e.entity_type} · score ${e.score.toFixed(2)}">${escapeHtml(text.slice(start, end))}</mark>`;
+    out += `<mark style="background:${color}33;color:${color}" title="${e.entity_type} · score ${e.score.toFixed(2)}">${escapeHtml(text.slice(start, end))}</mark>`;
     cursor = end;
   }
   out += escapeHtml(text.slice(cursor));
   return out;
 }
 
+function scoreClass(score) {
+  if (score >= 0.7) return 'score-high';
+  if (score >= 0.4) return 'score-mid';
+  return 'score-low';
+}
+
 function renderTable(entities) {
   if (!entities.length) return '<p class="empty">Không phát hiện thực thể nhạy cảm nào.</p>';
-  const rows = entities.map(e => `
+  const rows = entities.map(e => {
+    const color = colorFor(e.entity_type);
+    const pos = e.location.start != null ? `${e.location.start}-${e.location.end}` : '—';
+    return `
     <tr>
-      <td><span class="badge">${e.entity_type}</span></td>
-      <td>${escapeHtml(e.text_val)}</td>
-      <td class="${e.score >= 0.7 ? 'score-high' : 'score-low'}">${e.score.toFixed(2)}</td>
-      <td>${e.location.start}-${e.location.end}</td>
-    </tr>`).join('');
+      <td><span class="badge" style="background:${color}26;color:${color}">${e.entity_type}</span></td>
+      <td class="val" title="${escapeHtml(e.text_val)}">${escapeHtml(e.text_val)}</td>
+      <td class="${scoreClass(e.score)}">${e.score.toFixed(2)}</td>
+      <td>${pos}</td>
+    </tr>`;
+  }).join('');
   return `<table>
     <thead><tr><th>Loại</th><th>Giá trị</th><th>Score</th><th>Vị trí</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
 
+function renderStats(data, ms) {
+  const meta = data.document_metadata;
+  const stats = [
+    { label: 'Thời gian', value: `${ms}ms` },
+    { label: 'Thực thể', value: data.detected_entities.length },
+  ];
+  if (meta.file_type !== 'text') stats.push({ label: 'Xử lý', value: meta.processing_mode === 'ocr' ? 'OCR' : 'Trực tiếp' });
+  if (data.deep_scan_status) stats.push({ label: 'Deep scan', value: data.deep_scan_status });
+  return `<div class="stat-bar">${stats.map(s => `<div class="stat">${s.label}<b>${s.value}</b></div>`).join('')}</div>`;
+}
+
+// -------------------------------------------------------- scan action ----
 scanBtn.addEventListener('click', async () => {
-  const text = document.getElementById('inputText').value;
-  const apiKey = document.getElementById('apiKey').value;
+  const apiKey = apiKeyEl.value;
   const anonymize = document.getElementById('anonymize').checked;
   const deepScan = deepScanEl.checked;
   const model = deepScanModelEl.value || undefined;
+  const threshold = parseFloat(thresholdEl.value);
   statusEl.textContent = '';
   statusEl.className = '';
 
   if (!apiKey) {
-    statusEl.textContent = 'Cần nhập X-API-Key (đăng ký qua POST /register).';
+    statusEl.textContent = 'Cần nhập X-API-Key (hoặc đăng ký bên trên).';
     statusEl.className = 'error';
     return;
   }
-  if (!text.trim()) {
+  if (inputMode === 'text' && !document.getElementById('inputText').value.trim()) {
     statusEl.textContent = 'Chưa có văn bản để quét.';
+    statusEl.className = 'error';
+    return;
+  }
+  if (inputMode === 'file' && !selectedFile) {
+    statusEl.textContent = 'Chưa chọn file để quét.';
     statusEl.className = 'error';
     return;
   }
 
   scanBtn.disabled = true;
-  statusEl.textContent = 'Đang quét...';
+  statusEl.innerHTML = '<span class="spinner"></span>Đang quét...';
   const t0 = performance.now();
 
   try {
-    const res = await fetch('/api/v1/scan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-      body: JSON.stringify({ text, anonymize, deep_scan: deepScan, model })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.detail || `HTTP ${res.status}`);
+    let res, text = null;
+    if (inputMode === 'text') {
+      text = document.getElementById('inputText').value;
+      res = await fetch('/api/v1/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+        body: JSON.stringify({ text, anonymize, deep_scan: deepScan, model, confidence_threshold: threshold })
+      });
+    } else {
+      const form = new FormData();
+      form.append('file', selectedFile);
+      form.append('anonymize', anonymize);
+      form.append('deep_scan', deepScan);
+      form.append('confidence_threshold', threshold);
+      if (model) form.append('model', model);
+      res = await fetch('/api/v1/scan/file', { method: 'POST', headers: { 'X-API-Key': apiKey }, body: form });
     }
-    const ms = Math.round(performance.now() - t0);
-    let statusMsg = `Xong trong ${ms}ms · ${data.detected_entities.length} thực thể phát hiện.`;
-    if (data.deep_scan_status) statusMsg += ` · deep_scan: ${data.deep_scan_status}`;
-    statusEl.textContent = statusMsg;
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
 
-    let html = `<div id="highlighted">${renderHighlighted(text, data.detected_entities)}</div>`;
+    const ms = Math.round(performance.now() - t0);
+    statusEl.textContent = 'Xong.';
+    statusEl.className = '';
+
+    let html = renderStats(data, ms);
+    if (text !== null) {
+      html += `<div id="highlighted">${renderHighlighted(text, data.detected_entities)}</div>`;
+    } else {
+      html += `<p class="empty" style="padding:10px 0">Chế độ tải file không hiển thị được văn bản gốc để tô sáng — xem chi tiết vị trí/giá trị ở bảng bên dưới.</p>`;
+    }
     html += renderTable(data.detected_entities);
     if (anonymize && data.anonymized_content) {
-      html += `<h2 style="margin-top:18px">Văn bản đã ẩn danh hoá</h2><div id="highlighted">${escapeHtml(data.anonymized_content.text)}</div>`;
+      html += `<h3 class="section-title">Văn bản đã ẩn danh hoá</h3><div id="highlighted">${escapeHtml(data.anonymized_content.text)}</div>`;
     }
     resultArea.innerHTML = html;
     resultArea.className = '';

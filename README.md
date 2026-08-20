@@ -732,7 +732,9 @@ app/
   extract.py          PDF/DOCX/TXT -> plain text; OCR fallback (Tesseract) for scanned PDFs
   recognizers/
     recognizers.yaml  <- the whole regex extensibility story lives here
-static/index.html     Minimal demo console (paste text, see highlighted hits)
+static/index.html     Demo console — self-serve register/API key, paste-text or
+                      file-upload tabs, confidence slider, anonymize + deep scan
+                      (with live model picker), color-coded highlight + entity table
 tests/                58 tests total: detection (positive/negative/ambiguous),
                       file-upload, OCR fallback, deep-scan (incl. retry),
                       VN phone/ID/NER fixes, auth
