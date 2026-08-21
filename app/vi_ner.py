@@ -1,85 +1,15 @@
-"""Vietnamese-aware NER via underthesea — replaces SpacyRecognizer's role
-(PERSON/ORGANIZATION/LOCATION) for Vietnamese content, since en_core_web_sm
-has zero Vietnamese support (see app/recognizers/recognizers.yaml, where
-SpacyRecognizer is disabled).
+"""Vietnamese-aware NER via underthesea -- replaces SpacyRecognizer's
+PERSON/ORGANIZATION/LOCATION for Vietnamese (SpacyRecognizer disabled in
+recognizers.yaml; en_core_web_sm has no VN support). Registered
+programmatically in app/engine.py, not YAML.
 
-Registered programmatically in app/engine.py via registry.add_recognizer()
-rather than YAML, since it isn't a regex/pattern recognizer.
-
-Verified before writing this: ~109MB RSS to load (comparable to
-en_core_web_sm, acceptable on the target low-RAM host), no network call
-(model ships inside the pip package, confirmed — no ~/.cache download seen),
-~0.7s per call. Real accuracy tradeoff found in testing, not hidden: PERSON
-and real place names came back correct, but a company name ("Công ty TNHH
-Thiên Tứ") got merged into a wrongly-tagged LOCATION span in one test
-sentence — underthesea's ORG/LOC boundary isn't reliable. Base score (0.6)
-reflects that mixed precision; not treated as a high-confidence category.
-
-Second round of tuning after running this over sample_corpus/ (real
-enterprise-style documents, not just clean prose): underthesea's model
-treats ALL-CAPS headers, secret/key blobs and digit-bearing strings as
-strong entity signals, so raw output on real documents tagged things like
-"CHUYỂN GIAO HẠ TẦNG" (a section title), "BEGIN RSA PRIVATE KEY" and random
-base64 fragments as PERSON/LOCATION. Real Vietnamese full names and place
-names are consistently Title Case (each word capitalized, no digits); the
-garbage above is not. `_looks_like_named_entity()` filters spans against
-that shape before they're returned.
-
-Third round, found by re-running the exact real contract PDF that started
-this whole fix: some PDF exports drop the space glyph between certain word
-pairs at the font/kerning level (confirmed via raw pymupdf word-box
-inspection — the space is genuinely absent from the source file, not an
-extraction bug). A fused run like "Trợlý" or "Chếđộlàm" is opaque to
-underthesea's own tokenizer (it segments on whitespace first), so the whole
-glued run got swallowed as one token and tagged on capitalization alone.
-`_expand_fused_words()` repairs this *before* tagging: it walks each
-whitespace-delimited token that isn't already a recognized dictionary word
-and tries to split it into known Vietnamese syllables via a DP/Viterbi
-segmentation (shortest path over -log(frequency) costs, syllable
-frequencies counted from underthesea's own bundled Viet74K.txt — reused
-rather than shipping a second dictionary). A token only gets rewritten if
-the DP finds *full* coverage using 2+ recognized syllables; anything it
-can't fully explain (secrets, IDs, real foreign words like "Backup") is left
-untouched, so this can't corrupt content it doesn't understand. The
-inserted spaces exist only in the copy fed to underthesea — final entity
-offsets are mapped back through `_ExpansionMap` to the original text, so
-`RecognizerResult` spans and text_val always reflect the real document.
-
-Verified end-to-end against the actual hopdong.pdf that surfaced the
-missing-space problem: recovers a full party name ("Trịnh SỹThành") that
-was previously invisible entirely (its two syllables were glued and never
-resolved to anything NER would tag as PERSON), and correctly bounds real
-compound place names ("Phường Thủ Thiêm") that used to be split wrong.
-Residual, not fixed by this: underthesea sometimes assigns PERSON to a
-place name or LOCATION to a day-of-week ("Chủ Nhật") even with the right
-span boundaries — a type-confusion issue, not a segmentation one, and shape
-scoring below can't fix a type that's already wrong on a correctly-bounded
-span.
-
-Fourth round: single common words capitalized only by sentence/bullet
-position ("Được", "Xét", "Cục") used to pass the Title Case filter as a
-hard yes/no gate with every kept result getting a flat 0.6 — which also
-meant this recognizer, alone among every other one in this codebase,
-ignored the caller's confidence_threshold entirely: passed the shape check
-or didn't exist, nothing in between. Replaced with `_score_entity()`: same
-Title Case + no-digits shape check as a hard floor (headers/secrets/figures
-aren't ambiguous — they're just not names, score 0 and drop), but for
-what's left, a graduated score instead of a flat one, same idea as every
-regex category's strong/weak pattern split. Two signals, each weak alone
-but separating cleanly together (verified against every real/false-positive
-example gathered across this fix): multi-word spans (+0.15) since a real
-full name or place is almost always 2+ words; single-word spans where the
-word is itself a common dictionary entry (-0.25, reusing the syllable
-frequency table already loaded for word-fusion repair — checked as
-plain membership here, not the frequency value itself, since frequency
-alone doesn't separate common words from name syllables: "cục"=61 sits
-right next to real name syllables like "thủ"=143, "anh"=125); and
-sentence/bullet-initial position (-0.1), a cheap proxy for "capitalized
-because of where it sits, not what it is". Real entities land around 0.65,
-false positives around 0.15-0.40 — normal operating thresholds (0.5+, the
-API's own default is 0.7) see none of the noise; a caller who explicitly
-asks for a very low threshold sees marginal candidates too, which is what
-asking for a low threshold means everywhere else in this system.
+Raw underthesea output needs cleanup before use: `_score_entity()` grades
+matches instead of an all-or-nothing gate; `_expand_fused_words()` DP-
+segments space-fused tokens ("Trợlý"); `_collapse_repeated_punctuation()`
+shrinks dot-leader runs that otherwise stall tokenization;
+`_corrected_entity_type()` fixes known type-confusion cases. Both text
+transforms carry an offset mapping back to the original text so spans
+stay correct.
 """
 
 import logging
@@ -104,15 +34,11 @@ TAG_TO_ENTITY = {
 }
 
 _STRIP_CHARS = string.punctuation + "—–“”\"'"
-# ":" deliberately excluded — "Label: Value" (e.g. "Ông/Bà: Nguyễn Xuân Hùng")
-# is the single most common place a real name appears in these documents, so
-# treating a colon as a sentence boundary penalized exactly the wrong cases.
-# A bare newline is its own boundary signal, handled separately in
-# _is_sentence_initial (walks back over whitespace) rather than listed here.
+# ":" excluded on purpose -- "Ông/Bà: Nguyễn Xuân Hùng" is a common place a
+# real name appears, so treating it as a sentence boundary hurt precision.
 _SENTENCE_BOUNDARY_CHARS = ".-—–"
 
-# Reuses underthesea's own bundled word list as a syllable-frequency source
-# instead of shipping a second Vietnamese dictionary — see module docstring.
+# Reuses underthesea's own bundled word list instead of a second dictionary.
 _SYLLABLE_DICT_PATH = Path(underthesea.__file__).resolve().parent / "corpus" / "data" / "Viet74K.txt"
 _MIN_SYLLABLE_LEN = 2  # excludes stray single-letter entries (not real VN syllables)
 _MAX_SYLLABLE_LEN = 8  # longest real VN syllable with diacritics is well under this
@@ -123,33 +49,18 @@ _MULTI_WORD_BONUS = 0.15
 _SINGLE_WORD_COMMON_WORD_PENALTY = 0.25
 _SENTENCE_INITIAL_PENALTY = 0.1
 
-# Fifth round: 2 of the 3 remaining type-confusion cases turned out to be
-# fixable after all with a small, fully-enumerable gazetteer, once re-tested
-# with the same "add a signal" approach that fixed the single-word noise
-# above. Both verified against real documents before adding.
-#
-# Vietnamese day names are a closed set of exactly 7 — confirmed these get
-# tagged LOCATION ("Chủ Nhật", "Thứ Bảy" in a real labor contract's benefits
-# section). A day name is never itself PII, so this is a flat rejection
-# (score 0), not a type correction.
+# Vietnamese day names, a closed set of 7 -- never PII, so this is a flat
+# rejection (score 0), not a type correction.
 _CALENDAR_TERMS = {
     "thứ hai", "thứ ba", "thứ tư", "thứ năm", "thứ sáu", "thứ bảy", "chủ nhật",
 }
 
-# Vietnamese administrative-unit prefixes as the *first word of an
-# already-bounded span* are a reliable LOCATION signal — confirmed
-# underthesea gets the boundary right ("Phường Thủ Thiêm") but the type
-# wrong (tagged PERSON) in a real document. Type-only correction: never
-# touches the span boundary, so it carries none of the over-matching risk
-# found when a similar idea was tried for company names (see module
-# docstring) — that one was rejected, this one is narrow and verified safe.
+# Reliable LOCATION signal when underthesea gets the boundary right but the type wrong.
 _ADMIN_UNIT_PREFIXES = {
     "phường", "quận", "huyện", "tỉnh", "xã", "thị trấn", "thành phố",
 }
-# Some prefixes above are two words ("thị trấn", "thành phố") — matching must
-# try the longest leading word-group first, or a single-word .split()
-# comparison silently never matches them (found in review: the original
-# words[0]-only check made "thị trấn"/"thành phố" dead entries).
+# Two-word prefixes ("thị trấn") need the longest-leading-group match tried
+# first, or a single-word check never matches them.
 _ADMIN_UNIT_PREFIX_MAX_WORDS = max(len(p.split()) for p in _ADMIN_UNIT_PREFIXES)
 
 
@@ -167,18 +78,7 @@ def _corrected_entity_type(span_text: str, entity_type: str) -> str:
 
 
 def _is_sentence_initial(text: str, start: int) -> bool:
-    """True if `start` begins a new sentence/line/bullet.
-
-    Walks back over whitespace first rather than a plain .rstrip(), which
-    silently ate the newline itself before checking it — found via the
-    newline-splitting fix above surfacing spans that used to be hidden by
-    a different bug: "tài khoản\\nEmail" split into "tài khoản" (correctly
-    rejected) and "Email" (a bare newline before it should mean
-    sentence-initial, but .rstrip("...khoản\\n") -> "...khoản", and "n" is
-    not a boundary char, so the newline's own signal was lost). Crossing
-    any newline while walking back over whitespace counts as a boundary on
-    its own; otherwise the last non-whitespace char is checked as before.
-    """
+    """True if `start` begins a new sentence/line/bullet."""
     i = start
     saw_newline = False
     while i > 0 and text[i - 1].isspace():
@@ -190,34 +90,27 @@ def _is_sentence_initial(text: str, start: int) -> bool:
     return text[i - 1] in _SENTENCE_BOUNDARY_CHARS
 
 
-def _find_token(text: str, word: str, cursor: int) -> Optional[tuple]:
-    """Locate `word` in `text` starting from `cursor`, returning (start, end).
+_MAX_TOKEN_LOOKAHEAD = 100
+# Unbounded search can match a wrong distant occurrence and desync every later token.
 
-    Exact substring match first (fast path, matches originally); falls back
-    to treating spaces in `word` as "any run of whitespace" — found via a
-    two-column-layout test: underthesea's own tokenizer sometimes returns a
-    multi-syllable token with a plain space where the source text actually
-    had a newline (real names spanning two logical lines get merged with
-    the next line's content this way), so an exact-substring search
-    silently failed and dropped the whole entity with no error. This is the
-    root cause _split_on_newlines() below was written to work around, but
-    that fix only helps once a span is actually found here.
-    """
-    idx = text.find(word, cursor)
+
+def _find_token(text: str, word: str, cursor: int) -> Optional[tuple]:
+    """Exact match first, then spaces-as-whitespace-run (underthesea
+    sometimes returns a space where the source had a newline)."""
+    window_end = cursor + _MAX_TOKEN_LOOKAHEAD
+    idx = text.find(word, cursor, window_end)
     if idx != -1:
         return idx, idx + len(word)
     if " " in word:
         pattern = re.escape(word).replace(r"\ ", r"\s+")
-        m = re.compile(pattern).search(text, cursor)
+        m = re.compile(pattern).search(text, cursor, window_end)
         if m:
             return m.start(), m.end()
     return None
 
 
 def _split_on_newlines(text: str, start: int, end: int) -> List[tuple]:
-    """Yield (sub_start, sub_end) for each newline-delimited piece of
-    text[start:end] — see the call site in analyze() for why this exists.
-    """
+    """Yield (sub_start, sub_end) for each newline-delimited piece of text[start:end]."""
     pieces = []
     chunk_start = start
     for i in range(start, end):
@@ -231,11 +124,7 @@ def _split_on_newlines(text: str, start: int, end: int) -> List[tuple]:
 
 
 def _score_entity(span_text: str, sentence_initial: bool, freq: dict) -> float:
-    """Graduated confidence instead of a hard keep/reject gate, so this
-    recognizer respects the caller's confidence_threshold like every other
-    one in this codebase. See module docstring for how the two signals below
-    were chosen and verified.
-    """
+    """Graduated confidence instead of a hard keep/reject gate."""
     if any(ch.isdigit() for ch in span_text):
         return 0.0
     words = _normalized_words(span_text)
@@ -256,13 +145,8 @@ def _score_entity(span_text: str, sentence_initial: bool, freq: dict) -> float:
 
 @lru_cache(maxsize=1)
 def _load_syllable_freq() -> dict:
-    """syllable -> occurrence count, derived by splitting every entry in
-    underthesea's Viet74K.txt on whitespace/hyphens. That file is a general
-    word/phrase list (not syllable frequencies), so this is a proxy: a
-    syllable used in many different dictionary entries is common; used in
-    few (or none) is rare or a name — good enough for a DP segmentation cost,
-    not treated as a calibrated frequency.
-    """
+    """syllable -> occurrence count across underthesea's Viet74K.txt --
+    a proxy frequency, good enough for DP segmentation cost."""
     freq: dict = {}
     try:
         with open(_SYLLABLE_DICT_PATH, encoding="utf-8") as f:
@@ -283,10 +167,8 @@ def _load_syllable_freq() -> dict:
 
 
 def _segment_fused_token(token: str, freq: dict, log_total: float) -> Optional[List[str]]:
-    """DP/Viterbi split of `token` into known Vietnamese syllables. Returns
-    None if no full-coverage segmentation into 2+ syllables exists — the
-    caller then leaves the token untouched rather than forcing a bad split.
-    """
+    """DP/Viterbi split into known syllables; None if no full-coverage
+    2+ syllable segmentation exists."""
     n = len(token)
     lower = token.lower()
     best_cost: List[Optional[float]] = [None] * (n + 1)
@@ -318,13 +200,9 @@ def _segment_fused_token(token: str, freq: dict, log_total: float) -> Optional[L
 
 
 def _expand_fused_words(text: str) -> tuple[str, List[int]]:
-    """Return (expanded_text, mapping) where mapping[k] is the index in the
-    original `text` that expanded_text[k] corresponds to, or -1 for a space
-    this function inserted. Only rewrites tokens that aren't already a
-    recognized whole word and that DP-segment fully into 2+ syllables —
-    everything else (secrets, IDs, real single words) passes through
-    unchanged. See module docstring for why this exists.
-    """
+    """(expanded_text, mapping); mapping[k] is expanded_text[k]'s index in
+    `text`, or -1 for an inserted space. Only rewrites tokens that fully
+    DP-segment into 2+ syllables -- everything else passes through unchanged."""
     freq = _load_syllable_freq()
     if not freq:
         return text, list(range(len(text)))
@@ -367,10 +245,49 @@ def _expand_fused_words(text: str) -> tuple[str, List[int]]:
     return "".join(chars), mapping
 
 
+_REPEATED_PUNCT_MIN_RUN = 4
+_REPEATED_PUNCT_KEEP = 3
+# A long repeated-punctuation run (e.g. a dot-leader blank-fill line in VN
+# forms) makes underthesea stop tokenizing everything after it -- shrink first.
+
+
+def _collapse_repeated_punctuation(text: str) -> tuple[str, List[int]]:
+    """Same mapping contract as _expand_fused_words, but never inserts
+    (no -1 entries -- only removes characters)."""
+    chars: List[str] = []
+    mapping: List[int] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isalnum() or ch.isspace():
+            chars.append(ch)
+            mapping.append(i)
+            i += 1
+            continue
+        j = i
+        while j < n and text[j] == ch:
+            j += 1
+        run_len = j - i
+        keep = _REPEATED_PUNCT_KEEP if run_len >= _REPEATED_PUNCT_MIN_RUN else run_len
+        for k in range(keep):
+            chars.append(ch)
+            mapping.append(i + k)
+        i = j
+    return "".join(chars), mapping
+
+
+def _compose_mappings(outer: List[int], inner: List[int]) -> List[int]:
+    """Chains outer (indexes into `inner`'s text) with inner into one
+    mapping back to the original text, propagating -1 through either stage."""
+    composed = []
+    for idx in outer:
+        composed.append(-1 if idx == -1 or inner[idx] == -1 else inner[idx])
+    return composed
+
+
 def _map_span_to_original(start: int, end: int, mapping: List[int]) -> Optional[tuple]:
-    """Convert an [start, end) span in expanded-text space back to the
-    original text, skipping over inserted spaces (mapping value -1).
-    """
+    """[start, end) in expanded-text space -> original text, skipping -1 entries."""
     i = start
     while i < end and mapping[i] == -1:
         i += 1
@@ -384,9 +301,7 @@ def _map_span_to_original(start: int, end: int, mapping: List[int]) -> Optional[
 
 class VietnameseNerRecognizer(EntityRecognizer):
     """Wraps underthesea.ner(), realigning its token-level BIO output to
-    character offsets (underthesea gives no offsets itself, unlike
-    langextract's char_interval) and merging consecutive B-/I- spans.
-    """
+    character offsets (it gives none itself) and merging B-/I- spans."""
 
     def __init__(self):
         super().__init__(
@@ -401,39 +316,28 @@ class VietnameseNerRecognizer(EntityRecognizer):
     def analyze(
         self, text: str, entities: List[str], nlp_artifacts: Optional[NlpArtifacts] = None
     ) -> List[RecognizerResult]:
-        expanded_text, mapping = _expand_fused_words(text)
+        expanded_text, expand_mapping = _expand_fused_words(text)
+        tag_text, collapse_mapping = _collapse_repeated_punctuation(expanded_text)
+        mapping = _compose_mappings(collapse_mapping, expand_mapping)
 
         try:
-            tagged = underthesea_ner(expanded_text)
+            tagged = underthesea_ner(tag_text)
         except Exception:
             logger.warning("vi_ner: underthesea call failed", exc_info=True)
             return []
 
         freq = _load_syllable_freq()
-        spans = self._align_and_merge(expanded_text, tagged)
+        spans = self._align_and_merge(tag_text, tagged)
         results = []
         for start, end, raw_entity_type in spans:
-            # Correction happens before the entities filter below: a span
-            # underthesea mistyped as PERSON but that a gazetteer identifies
-            # as LOCATION must still surface when the caller asked for
-            # LOCATION, even if they didn't ask for PERSON.
-            entity_type = _corrected_entity_type(expanded_text[start:end], raw_entity_type)
+            # correct type before filtering, so a mistyped LOCATION still surfaces
+            entity_type = _corrected_entity_type(tag_text[start:end], raw_entity_type)
             if entity_type not in entities:
                 continue
-            # Split on newlines before scoring: underthesea's own tokenizer
-            # doesn't treat "\n" as a boundary, so it sometimes fuses a real
-            # name with the next line's label word into one token — found
-            # via a two-column-layout test document ("Trần Thị Hoa" fused
-            # with the next line's "Số CCCD" into one span, which then
-            # failed the Title Case check as a whole because "CCCD" is
-            # all-caps, losing the real name entirely). Scoring each
-            # newline-delimited piece independently recovers "Trần Thị Hoa"
-            # on its own merits and still rejects "Số CCCD" on its own —
-            # also fixes the same underlying issue in the already-documented
-            # "Tên\nNguyễn Xuân Hùng" case from earlier in this project.
-            for sub_start, sub_end in _split_on_newlines(expanded_text, start, end):
-                sentence_initial = _is_sentence_initial(expanded_text, sub_start)
-                score = _score_entity(expanded_text[sub_start:sub_end], sentence_initial, freq)
+            # underthesea ignores "\n" as a boundary, fusing a name with the next line
+            for sub_start, sub_end in _split_on_newlines(tag_text, start, end):
+                sentence_initial = _is_sentence_initial(tag_text, sub_start)
+                score = _score_entity(tag_text[sub_start:sub_end], sentence_initial, freq)
                 if score <= 0.0:
                     continue
                 mapped = _map_span_to_original(sub_start, sub_end, mapping)
@@ -450,11 +354,7 @@ class VietnameseNerRecognizer(EntityRecognizer):
     @staticmethod
     def _align_and_merge(text: str, tagged) -> List[tuple]:
         """(word, pos, chunk, bio_tag) tuples -> [(start, end, entity_type), ...].
-
-        Searches forward from a cursor so repeated words align to their
-        correct (not first) occurrence; skips a token if it still can't be
-        found even with whitespace-flexible matching (see _find_token).
-        """
+        Cursor moves forward so repeated words align to the right occurrence."""
         spans = []
         cursor = 0
         current: Optional[list] = None  # [start, end, entity_type]

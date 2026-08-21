@@ -17,12 +17,24 @@ from app.vi_ner import VietnameseNerRecognizer
 RECOGNIZERS_CONF = Path(__file__).resolve().parent / "recognizers" / "recognizers.yaml"
 
 
+# Silences "not mapped to a Presidio entity" warning spam -- spaCy's NER
+# still runs (for other recognizers' tokenization) even though SpacyRecognizer
+# itself is disabled.
+_SPACY_LABELS_NOT_USED_BY_ANY_RECOGNIZER = [
+    "CARDINAL", "EVENT", "FAC", "LANGUAGE", "LAW", "MONEY",
+    "ORDINAL", "PERCENT", "PRODUCT", "QUANTITY", "WORK_OF_ART",
+]
+
+
 def build_nlp_engine() -> NlpEngine:
     """Build the shared spaCy NLP engine (en_core_web_sm)."""
     return NlpEngineProvider(
         nlp_configuration={
             "nlp_engine_name": "spacy",
             "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+            "ner_model_configuration": {
+                "labels_to_ignore": _SPACY_LABELS_NOT_USED_BY_ANY_RECOGNIZER,
+            },
         }
     ).create_engine()
 
@@ -35,13 +47,12 @@ def build_engines() -> tuple[AnalyzerEngine, AnonymizerEngine]:
         conf_file=str(RECOGNIZERS_CONF), nlp_engine=nlp_engine
     ).create_recognizer_registry()
 
-    # Not YAML-declarable (not a regex/pattern recognizer) — registered here
-    # instead. Replaces SpacyRecognizer's PERSON/ORGANIZATION/LOCATION role
-    # for Vietnamese content; SpacyRecognizer itself is disabled in the YAML.
+    # Not YAML-declarable (not a regex recognizer) -- replaces disabled
+    # SpacyRecognizer's PERSON/ORGANIZATION/LOCATION role for VN content.
     registry.add_recognizer(VietnameseNerRecognizer())
 
-    # Widened to 8/8 (Presidio default: 5, prefix-only) — Vietnamese phrasing
-    # often puts several filler words between a label and its value.
+    # Widened from Presidio's default 5/prefix-only -- VN phrasing often
+    # puts filler words between a label and its value.
     context_enhancer = LemmaContextAwareEnhancer(
         context_prefix_count=8, context_suffix_count=8
     )

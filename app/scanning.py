@@ -22,24 +22,13 @@ from app.schemas import (
 CONTEXT_WINDOW = 40  # chars of surrounding text captured in context_snippet
 MAX_TEXT_LENGTH = 50_000  # guardrail for the target low-RAM (i3) host
 SUPPORTED_LANGUAGES = {"en"}
-# Vietnamese content still scans fine under "en" (categories are regex-based,
-# not NER-dependent) — a real Vietnamese model is a roadmap item, see README.
+# Vietnamese content still scans fine under "en" -- categories are regex-based.
 
 
 def _drop_lower_scored_exact_duplicates(results: list) -> list:
-    """When two different categories match the exact same [start, end) span,
-    keep only the highest-scoring one.
-
-    Found via Presidio's own built-in multi-region PhoneRecognizer (kept at
-    its full 8-region default on purpose — narrowing it was considered and
-    rejected, since phone coverage needs to stay broad, not VN/US-only):
-    a CIDR block, a VN national ID, and a VN tax code each also happen to
-    match some other country's phone-number shape, always at a low 0.4 vs.
-    the correct category's 0.6-0.9. The text can't genuinely be two
-    different identifier types at once, so the lower-scoring duplicate on
-    the identical span is redundant noise, not a second real finding — this
-    fixes that without touching PhoneRecognizer's region list at all, so
-    real international phone coverage is untouched.
+    """When two categories match the exact same [start, end) span, keep only
+    the highest-scoring one -- e.g. a VN national ID also matching some
+    other country's phone-number shape at a lower score.
     """
     best_by_span: dict = {}
     for r in results:
@@ -50,34 +39,29 @@ def _drop_lower_scored_exact_duplicates(results: list) -> list:
     return list(best_by_span.values())
 
 
-# Entity types deep scan can also produce (currently just ORGANIZATION, see
-# app/deep_scan.py) -- an overlap between the free regex/NER path and deep
-# scan on one of *these* types means "two interpretations of the same real
-# thing" (e.g. underthesea's truncated "Toàn Cầu" vs. deep scan's full
-# "Công ty Cổ phần Đầu Tư Toàn Cầu"), not "two different facts." Deliberately
-# not applied to IP_TRADE_SECRET_CONTENT/HR_SENSITIVE_CONTENT, which flag a
-# whole sentence and routinely overlap a PHONE_NUMBER or similar mentioned
-# inside it -- those are genuinely separate findings, not competing spans
-# for the same value, and must never be dropped just for falling inside one.
-_DEEP_SCAN_OVERLAP_TYPES = {"ORGANIZATION", "PERSON", "LOCATION"}
+# Entity types deep scan can also produce -- an overlap means deep scan's
+# version wins. Excludes the two whole-sentence-flag types, which routinely
+# overlap unrelated nested entities.
+_DEEP_SCAN_OVERLAP_TYPES = {
+    "ORGANIZATION", "PERSON", "LOCATION",
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "URL", "IP_ADDRESS", "CREDIT_CARD",
+    "IBAN_CODE", "CRYPTO", "MAC_ADDRESS", "US_SSN",
+    "CONTRACT_ID", "INTERNAL_TAX_CODE", "FINANCIAL_METRIC", "EMPLOYEE_ID",
+    "INFRA_SECRET", "IP_SENSITIVE_MARKER", "CRYPTO_PRIVATE_KEY",
+    "INFRA_NETWORK_MAP", "GPS_LOCATION", "FINANCIAL_CREDENTIAL",
+    "VN_NATIONAL_ID", "BANK_ACCOUNT_NUMBER", "FULL_ADDRESS",
+}
 
-# Deep-scan categories that flag a whole sentence's *topic* rather than
-# extract a specific value -- see anonymize's construction in run_scan()
-# below for why these are excluded from masking rather than replaced with
-# a tag like everything else.
+# Deep-scan categories that flag a whole sentence's topic, not a value to mask.
 _ANONYMIZE_EXCLUDED_TYPES = {"HR_SENSITIVE_CONTENT", "IP_TRADE_SECRET_CONTENT"}
 
 
 def _drop_regex_ner_entities_overlapped_by_deep_scan(
     base_entities: list, deep_entities: list
 ) -> list:
-    """When deep scan (an opt-in, paid verification pass) finds an
-    ORGANIZATION/PERSON/LOCATION entity whose span overlaps one the free
-    regex/NER path already found of the same type, keep only deep scan's —
-    that's the reason a caller paid for the extra Gemini call. Span overlap
-    rather than exact-match dedup (see _drop_lower_scored_exact_duplicates
-    above) because the spans genuinely differ in width, not just score:
-    underthesea's is a truncated substring of deep scan's fuller one.
+    """Drop a free-path entity when deep scan found an overlapping one of a
+    type it can produce -- deep scan's span is usually the fuller/correct
+    one (e.g. underthesea's truncated company name vs. deep scan's full one).
     """
     competing_deep = [d for d in deep_entities if d.entity_type in _DEEP_SCAN_OVERLAP_TYPES]
     if not competing_deep:
@@ -153,19 +137,8 @@ def run_scan(
 
     anonymized_content = None
     if anonymize:
-        # Built from the final, already-deduped `entities` list (not the
-        # raw regex/NER `results`) so masking always matches exactly what
-        # detected_entities reports -- including deep-scan's ORGANIZATION,
-        # converted back to a RecognizerResult since that's what
-        # AnonymizerEngine understands. HR_SENSITIVE_CONTENT/
-        # IP_TRADE_SECRET_CONTENT are excluded on purpose: those flag a
-        # whole sentence's topic, not a specific value to redact, and
-        # AnonymizerEngine resolves overlaps by letting the wider span win
-        # (verified directly) -- including them would silently swallow a
-        # real PHONE_NUMBER or similar nested inside the flagged sentence
-        # into one opaque `<HR_SENSITIVE_CONTENT>` tag, destroying the
-        # sentence structure for no benefit (the topic flag itself isn't
-        # identifying information that needs masking).
+        # Built from the final deduped `entities`, not raw `results`, so
+        # masking matches what detected_entities reports.
         anonymize_results = [
             RecognizerResult(
                 entity_type=e.entity_type,

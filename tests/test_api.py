@@ -178,9 +178,7 @@ def test_scan_unsupported_file_type_rejected(client, api_key):
 
 
 def test_corrupt_pdf_rejected_cleanly_not_a_500(client, api_key):
-    # Found via adversarial file-upload testing: pymupdf.open() raises its
-    # own FileDataError for a malformed PDF, which used to propagate as an
-    # unhandled 500 instead of the documented clear 422.
+    # pymupdf.FileDataError must map to a 422, not an unhandled 500.
     resp = client.post(
         "/api/v1/scan/file",
         files={"file": ("garbage.pdf", b"this is not a valid pdf at all", "application/pdf")},
@@ -191,8 +189,6 @@ def test_corrupt_pdf_rejected_cleanly_not_a_500(client, api_key):
 
 
 def test_empty_pdf_rejected_cleanly_not_a_500(client, api_key):
-    # Same root cause as the corrupt-PDF case: pymupdf.EmptyFileError is a
-    # FileDataError subclass, previously uncaught.
     resp = client.post(
         "/api/v1/scan/file",
         files={"file": ("empty.pdf", b"", "application/pdf")},
@@ -202,10 +198,8 @@ def test_empty_pdf_rejected_cleanly_not_a_500(client, api_key):
 
 
 def test_corrupt_docx_rejected_cleanly_not_a_500(client, api_key):
-    # python-docx's Document() doesn't guarantee one exception type for a
-    # malformed file (confirmed empirically: zipfile.BadZipFile for a
-    # non-zip, a plain KeyError for a valid zip that isn't a real docx) —
-    # previously uncaught either way, an unhandled 500.
+    # Document() raises zipfile.BadZipFile or KeyError depending on how
+    # malformed the file is -- both must map to a 422.
     resp = client.post(
         "/api/v1/scan/file",
         files={
@@ -251,7 +245,7 @@ def test_scanned_pdf_falls_back_to_ocr(client, api_key, monkeypatch):
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["document_metadata"]["processing_mode"] == "ocr"
+    assert body["document_metadata"]["processing_mode"] == "ocr_local"
     assert "CONTRACT_ID" in entity_types(resp)
 
 
@@ -291,6 +285,992 @@ def test_scanned_pdf_over_page_limit_rejected_before_ocr_attempt(client, api_key
     )
     assert resp.status_code == 422
     assert str(MAX_OCR_PAGES) in resp.json()["detail"]
+
+
+# --------------------------------------------------------- PDF redaction ----
+# /api/v1/redact/file returns an actual redacted file, not just masked text.
+
+
+def _build_scanned_pdf_with_real_text(text: str) -> bytes:
+    src = pymupdf.open()
+    p = src.new_page()
+    p.insert_text((72, 72), text)
+    pix = p.get_pixmap(dpi=200)
+    img_bytes = pix.tobytes("png")
+    src.close()
+
+    out = pymupdf.open()
+    page = out.new_page(width=pix.width, height=pix.height)
+    page.insert_image(page.rect, stream=img_bytes)
+    raw = out.tobytes()
+    out.close()
+    return raw
+
+
+def test_redact_digital_pdf_removes_sensitive_text_for_real(client, api_key):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Contact john@example.com or call 0912345678 for details.")
+    raw = doc.tobytes()
+    doc.close()
+
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={"file": ("contract.pdf", raw, "application/pdf")},
+        data={"confidence_threshold": "0.3"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "application/pdf"
+    assert "attachment" in resp.headers["content-disposition"]
+
+    redacted = pymupdf.open(stream=resp.content, filetype="pdf")
+    text = redacted[0].get_text()
+    assert "john@example.com" not in text
+    assert "0912345678" not in text
+
+
+def test_redact_scanned_pdf_local_blacks_out_the_image(client, api_key):
+    import pytesseract
+    from PIL import Image
+
+    raw = _build_scanned_pdf_with_real_text(
+        "Contact john@example.com or call 0912345678 for details."
+    )
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={"file": ("scanned.pdf", raw, "application/pdf")},
+        data={"confidence_threshold": "0.3", "ocr_engine": "local"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+
+    redacted = pymupdf.open(stream=resp.content, filetype="pdf")
+    pix = redacted[0].get_pixmap(dpi=200)
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    retext = pytesseract.image_to_string(img, lang="eng")
+    assert "john@example.com" not in retext
+    assert "0912345678" not in retext
+
+
+def test_redact_output_is_reasonably_sized_not_bloated(client, api_key):
+    # doc.tobytes() without garbage/deflate/clean left old page data behind.
+    raw = _build_scanned_pdf_with_real_text("Contact john@example.com for details.")
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={"file": ("scanned.pdf", raw, "application/pdf")},
+        data={"confidence_threshold": "0.3", "ocr_engine": "local"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(resp.content) < 500_000, f"redacted PDF suspiciously large: {len(resp.content)} bytes"
+
+
+def test_redact_rejects_unsupported_file_type(client, api_key):
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={"file": ("notes.csv", b"a,b,c", "text/csv")},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert ".csv" in resp.json()["detail"] or "csv" in resp.json()["detail"].lower()
+
+
+def test_redact_txt_masks_sensitive_text(client, api_key):
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={
+            "file": (
+                "notes.txt",
+                b"john@example.com is the contact email.",
+                "text/plain",
+            )
+        },
+        data={"confidence_threshold": "0.3"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/plain")
+    body = resp.content.decode("utf-8")
+    assert "john@example.com" not in body
+    assert "<EMAIL_ADDRESS>" in body
+
+
+def test_redact_docx_removes_sensitive_text_for_real(client, api_key):
+    import zipfile
+
+    buf = io.BytesIO()
+    document = Document()
+    document.add_paragraph("john@example.com is the contact email.")
+    document.save(buf)
+
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={
+            "file": (
+                "contract.docx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        data={"confidence_threshold": "0.3"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    assert (
+        resp.headers["content-type"]
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+    redacted = Document(io.BytesIO(resp.content))
+    assert "john@example.com" not in redacted.paragraphs[0].text
+
+    # Real XML-level deletion, not just the friendly API's view.
+    z = zipfile.ZipFile(io.BytesIO(resp.content))
+    xml = z.read("word/document.xml").decode("utf-8")
+    assert "john@example.com" not in xml
+
+
+def test_redact_docx_covers_tables_and_headers(client, api_key):
+    buf = io.BytesIO()
+    document = Document()
+    document.add_paragraph("Body text with nothing sensitive.")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "jane.doe@example.com is in this cell."
+    document.sections[0].header.paragraphs[0].text = "Memo phone: 0987654321."
+    document.save(buf)
+
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={
+            "file": (
+                "memo.docx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        data={"confidence_threshold": "0.3"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    redacted = Document(io.BytesIO(resp.content))
+    assert "jane.doe@example.com" not in redacted.tables[0].cell(0, 0).text
+    assert "0987654321" not in redacted.sections[0].header.paragraphs[0].text
+
+
+def test_redact_docx_embedded_image_blacks_out_the_image(client, api_key):
+    import pymupdf
+    import pytesseract
+    from PIL import Image
+
+    src = pymupdf.open()
+    page = src.new_page()
+    page.insert_text((36, 36), "Contact john@example.com or call 0912345678.", fontsize=14)
+    pix = page.get_pixmap(dpi=200)
+    img_bytes = pix.tobytes("png")
+    src.close()
+
+    document = Document()
+    document.add_paragraph("Nothing sensitive in the body.")
+    document.add_picture(io.BytesIO(img_bytes))
+    buf = io.BytesIO()
+    document.save(buf)
+
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={
+            "file": (
+                "scanned.docx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        data={"confidence_threshold": "0.3", "ocr_engine": "local"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+
+    redacted = Document(io.BytesIO(resp.content))
+    image_part = next(
+        p for p in redacted.part.related_parts.values() if p.content_type.startswith("image/")
+    )
+    img2 = Image.open(io.BytesIO(image_part.blob))
+    retext = pytesseract.image_to_string(img2, lang="eng")
+    assert "john@example.com" not in retext
+    assert "0912345678" not in retext
+
+
+def test_redact_docx_unsupported_embedded_image_format_gives_clear_422(client, api_key, monkeypatch):
+    from app import redact as redact_module
+
+    monkeypatch.delitem(redact_module._CONTENT_TYPE_TO_PIL_FORMAT, "image/png")
+
+    document = Document()
+    document.add_paragraph("Nothing sensitive in the body.")
+    # A 1x1 PNG is enough -- this test is about the content-type gate,
+    # not what's actually drawn in the image.
+    from PIL import Image as PILImage
+
+    tiny = io.BytesIO()
+    PILImage.new("RGB", (1, 1)).save(tiny, format="PNG")
+    tiny.seek(0)
+    document.add_picture(tiny)
+    buf = io.BytesIO()
+    document.save(buf)
+
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={
+            "file": (
+                "scanned.docx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        data={"confidence_threshold": "0.3"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "image/png" in resp.json()["detail"]
+
+
+def test_redact_via_cloud_engine_consumes_ocr_api_quota(client, monkeypatch):
+    from PIL import Image
+
+    from app import redact as redact_module
+    from app.ocr_api import OcrWord
+
+    mocked_bbox = (100.0, 100.0, 400.0, 130.0)
+    monkeypatch.setattr(
+        redact_module,
+        "ocr_words_via_api",
+        lambda engine, png_bytes, model=None: [
+            OcrWord(
+                text="Contact john@example.com or call 0912345678 for details.",
+                bbox=mocked_bbox,
+            )
+        ],
+    )
+    email = f"redact-quota-{uuid.uuid4().hex[:8]}@sensen.dev"
+    key = client.post("/register", json={"email": email}).json()["api_key"]
+    raw = _build_scanned_pdf_with_real_text("placeholder -- OCR is mocked")
+
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={"file": ("scanned.pdf", raw, "application/pdf")},
+        data={"confidence_threshold": "0.3", "ocr_engine": "gemini"},
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # get_text() is always "" for an image page -- check the actual pixel
+    # color at the mocked bbox instead.
+    redacted = pymupdf.open(stream=resp.content, filetype="pdf")
+    pix = redacted[0].get_pixmap(dpi=200)
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    cx, cy = int((mocked_bbox[0] + mocked_bbox[2]) / 2), int((mocked_bbox[1] + mocked_bbox[3]) / 2)
+    pixel = img.convert("RGB").getpixel((cx, cy))
+    assert pixel == (0, 0, 0), f"expected black at redacted bbox center, got {pixel}"
+
+    usage = client.get("/api/v1/usage", headers={"X-API-Key": key}).json()
+    assert usage["ocr_api_used"] == 1
+
+
+def test_redact_cloud_engine_no_boxes_returned_gives_clear_422(client, api_key, monkeypatch):
+    from app import redact as redact_module
+
+    monkeypatch.setattr(redact_module, "ocr_words_via_api", lambda engine, png_bytes, model=None: [])
+    raw = _build_scanned_pdf_with_real_text("Contact john@example.com for details.")
+    resp = client.post(
+        "/api/v1/redact/file",
+        files={"file": ("scanned.pdf", raw, "application/pdf")},
+        data={"confidence_threshold": "0.3", "ocr_engine": "gemini"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "no usable text/boxes" in resp.json()["detail"]
+
+
+def test_redact_digital_page_fails_safely_when_entity_cant_be_located():
+    # An unlocatable entity must fail loudly (RedactionFailed), never
+    # silently produce a PDF that looks redacted but missed something.
+    from app.engine import build_engines
+    from app.redact import RedactionFailed, _redact_digital_page
+
+    analyzer, _ = build_engines()
+
+    class StubPage:
+        number = 0
+
+        def get_text(self):
+            # No leading capitalized word -- avoids a known underthesea
+            # false positive that would add an unrelated entity first.
+            return "john@example.com is the contact email."
+
+        def search_for(self, text):
+            return []  # simulates pymupdf failing to locate the text on the page
+
+        def add_redact_annot(self, *a, **k):
+            raise AssertionError("must not attempt to redact when search_for found nothing")
+
+        def apply_redactions(self):
+            raise AssertionError("must not apply redactions when search_for found nothing")
+
+    try:
+        _redact_digital_page(StubPage(), analyzer, 0.3, False, None)
+        assert False, "expected RedactionFailed when the entity can't be located on the page"
+    except RedactionFailed as exc:
+        assert "john@example.com" in str(exc)
+
+
+# --------------------------------------------------------- cloud ocr api ----
+# Patches target app.extract.ocr_image_via_api, the bound name it imports.
+
+
+def test_cloud_ocr_engine_used_when_requested(client, api_key, monkeypatch):
+    captured = {}
+
+    def _fake_ocr(engine, png_bytes, model=None):
+        captured["engine"] = engine
+        captured["model"] = model
+        return "Hợp đồng số HD-2026-7777"
+
+    monkeypatch.setattr("app.extract.ocr_image_via_api", _fake_ocr)
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "gemini"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["engine"] == "gemini"
+    assert captured["model"] is None  # no override passed -> falls back to the env-var default
+    assert resp.json()["document_metadata"]["processing_mode"] == "ocr_gemini"
+    assert "CONTRACT_ID" in entity_types(resp)
+
+
+def test_cloud_ocr_model_override_passed_through(client, api_key, monkeypatch):
+    # Deliberately a different model than deep_scan's own DEFAULT_MODEL_ID
+    # -- OCR and deep_scan must be independently overridable per request.
+    captured = {}
+
+    def _fake_ocr(engine, png_bytes, model=None):
+        captured["model"] = model
+        return "Hợp đồng số HD-2026-7777"
+
+    monkeypatch.setattr("app.extract.ocr_image_via_api", _fake_ocr)
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "gemini", "ocr_model": "gemini-flash-latest"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["model"] == "gemini-flash-latest"
+
+
+def test_ocr_models_endpoint_reuses_deep_scan_listing_for_gemini(client, api_key, monkeypatch):
+    monkeypatch.delenv("LANGEXTRACT_API_KEY", raising=False)
+    resp = client.get(
+        "/api/v1/ocr/models", params={"engine": "gemini"}, headers={"X-API-Key": api_key}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "skipped_no_key"
+    assert body["default_model"] == "gemini-flash-lite-latest"
+
+
+def test_ocr_models_endpoint_reports_no_key_for_openai(client, api_key, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    resp = client.get(
+        "/api/v1/ocr/models", params={"engine": "openai"}, headers={"X-API-Key": api_key}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "skipped_no_key"
+    assert body["default_model"] == "gpt-5.6"
+    assert body["models"] == []
+
+
+def test_ocr_models_endpoint_rejects_unknown_engine(client, api_key):
+    resp = client.get(
+        "/api/v1/ocr/models", params={"engine": "deepseek"}, headers={"X-API-Key": api_key}
+    )
+    assert resp.status_code == 422
+
+
+def test_ocr_models_endpoint_requires_auth(client):
+    resp = client.get("/api/v1/ocr/models", params={"engine": "gemini"})
+    assert resp.status_code == 422  # missing required header
+
+
+def test_cloud_ocr_not_configured_gives_clear_422(client, api_key, monkeypatch):
+    from app.ocr_api import OcrApiNotConfigured
+
+    def _raise_not_configured(engine, png_bytes, model=None):
+        raise OcrApiNotConfigured("openai", "OPENAI_API_KEY")
+
+    monkeypatch.setattr("app.extract.ocr_image_via_api", _raise_not_configured)
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "openai"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "OPENAI_API_KEY" in resp.json()["detail"]
+
+
+def test_cloud_ocr_provider_failure_gives_clear_422(client, api_key, monkeypatch):
+    from app.ocr_api import OcrApiError
+
+    def _raise_error(engine, png_bytes, model=None):
+        raise OcrApiError("simulated provider failure")
+
+    monkeypatch.setattr("app.extract.ocr_image_via_api", _raise_error)
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "grok"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+    assert "simulated provider failure" in resp.json()["detail"]
+
+
+def test_invalid_ocr_engine_rejected(client, api_key):
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "deepseek"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 422
+
+
+def test_ocr_api_quota_exceeded_after_cap(client, monkeypatch):
+    from app.pages import MAX_OCR_API_PER_KEY
+
+    monkeypatch.setattr(
+        "app.extract.ocr_image_via_api", lambda engine, png_bytes, model=None: "Hợp đồng số HD-2026-7777"
+    )
+    email = f"ocr-quota-{uuid.uuid4().hex[:8]}@sensen.dev"
+    key = client.post("/register", json={"email": email}).json()["api_key"]
+
+    for _ in range(MAX_OCR_API_PER_KEY):
+        resp = client.post(
+            "/api/v1/scan/file",
+            files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+            data={"ocr_engine": "gemini"},
+            headers={"X-API-Key": key},
+        )
+        assert resp.status_code == 200, resp.text
+
+    resp = client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "gemini"},
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 422
+    assert "quota" in resp.json()["detail"].lower()
+
+
+def test_ocr_api_quota_not_consumed_by_local_engine(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.extract.pytesseract.image_to_string", lambda img, lang=None: "some text"
+    )
+    email = f"ocr-local-{uuid.uuid4().hex[:8]}@sensen.dev"
+    key = client.post("/register", json={"email": email}).json()["api_key"]
+
+    client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        headers={"X-API-Key": key},
+    )
+    resp = client.get("/api/v1/usage", headers={"X-API-Key": key})
+    assert resp.json()["ocr_api_used"] == 0
+
+
+def test_usage_endpoint_reports_counts(client, monkeypatch):
+    monkeypatch.setattr("app.scanning.run_deep_scan", lambda text, model_id=None: ([], "ok"))
+    monkeypatch.setattr(
+        "app.extract.ocr_image_via_api", lambda engine, png_bytes, model=None: "Hợp đồng số HD-2026-7777"
+    )
+    email = f"usage-{uuid.uuid4().hex[:8]}@sensen.dev"
+    key = client.post("/register", json={"email": email}).json()["api_key"]
+
+    client.post(
+        "/api/v1/scan", json={"text": "hello", "deep_scan": True}, headers={"X-API-Key": key}
+    )
+    client.post(
+        "/api/v1/scan/file",
+        files={"file": ("scanned.pdf", _build_image_only_pdf(), "application/pdf")},
+        data={"ocr_engine": "openai"},
+        headers={"X-API-Key": key},
+    )
+    resp = client.get("/api/v1/usage", headers={"X-API-Key": key})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deep_scan_used"] == 1
+    assert body["ocr_api_used"] == 1
+
+
+def test_usage_endpoint_requires_auth(client):
+    resp = client.get("/api/v1/usage")
+    assert resp.status_code == 422  # missing required header
+
+
+# ------------------------------------------- rate limiter (app/rate_limiter.py) ----
+# time.monotonic/time.sleep are faked so tests run instantly.
+
+
+def test_rate_limiter_allows_up_to_max_calls_without_blocking(monkeypatch):
+    from app import rate_limiter
+
+    fake_now = {"t": 0.0}
+    monkeypatch.setattr(rate_limiter.time, "monotonic", lambda: fake_now["t"])
+    sleeps = []
+    monkeypatch.setattr(rate_limiter.time, "sleep", lambda s: sleeps.append(s))
+
+    limiter = rate_limiter.SlidingWindowRateLimiter(max_calls=3, label="test")
+    for _ in range(3):
+        limiter.acquire()
+    assert sleeps == []
+
+
+def test_rate_limiter_blocks_when_budget_exhausted_then_recovers(monkeypatch):
+    from app import rate_limiter
+
+    fake_now = {"t": 0.0}
+
+    def fake_sleep(s):
+        fake_now["t"] += s  # simulate time actually passing while asleep
+
+    monkeypatch.setattr(rate_limiter.time, "monotonic", lambda: fake_now["t"])
+    monkeypatch.setattr(rate_limiter.time, "sleep", fake_sleep)
+
+    limiter = rate_limiter.SlidingWindowRateLimiter(max_calls=2, label="test")
+    limiter.acquire()
+    limiter.acquire()
+    limiter.acquire()  # budget exhausted, must wait for the window to free up
+    assert fake_now["t"] > 0
+
+
+def test_rate_limiter_disabled_when_max_calls_is_zero(monkeypatch):
+    from app import rate_limiter
+
+    sleeps = []
+    monkeypatch.setattr(rate_limiter.time, "sleep", lambda s: sleeps.append(s))
+    limiter = rate_limiter.SlidingWindowRateLimiter(max_calls=0, label="test")
+    for _ in range(50):
+        limiter.acquire()
+    assert sleeps == []
+
+
+def test_int_env_helper_parses_and_falls_back(monkeypatch):
+    from app.rate_limiter import _int_env
+
+    monkeypatch.setenv("SENSEN_TEST_RPM_VAR", "7")
+    assert _int_env("SENSEN_TEST_RPM_VAR", 99) == 7
+    monkeypatch.delenv("SENSEN_TEST_RPM_VAR", raising=False)
+    assert _int_env("SENSEN_TEST_RPM_VAR", 99) == 99
+    monkeypatch.setenv("SENSEN_TEST_RPM_VAR", "not-a-number")
+    assert _int_env("SENSEN_TEST_RPM_VAR", 99) == 99
+
+
+def test_ocr_api_and_deep_scan_share_the_same_gemini_rate_limiter():
+    # Both draw down the same real Gemini RPM budget -- must share one instance.
+    from app import deep_scan, ocr_api
+
+    assert ocr_api.gemini_limiter is deep_scan.gemini_limiter
+
+
+def test_ocr_gemini_call_goes_through_the_shared_rate_limiter(monkeypatch):
+    from app import ocr_api
+
+    calls = {"n": 0}
+    monkeypatch.setattr(ocr_api.gemini_limiter, "acquire", lambda: calls.__setitem__("n", calls["n"] + 1))
+
+    class FakeResponse:
+        text = "extracted text"
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(ocr_api.genai, "Client", FakeClient)
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key")
+    result = ocr_api.ocr_image_via_api("gemini", b"fake-png")
+    assert result == "extracted text"
+    assert calls["n"] == 1
+
+
+def test_run_deep_scan_call_goes_through_the_shared_rate_limiter(monkeypatch):
+    from app import deep_scan
+
+    calls = {"n": 0}
+    monkeypatch.setattr(deep_scan.gemini_limiter, "acquire", lambda: calls.__setitem__("n", calls["n"] + 1))
+
+    class FakeResult:
+        extractions = []
+
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key")
+    monkeypatch.setattr(deep_scan.lx, "extract", lambda **kwargs: FakeResult())
+    entities, status = deep_scan.run_deep_scan("some text")
+    assert status == "ok"
+    assert calls["n"] == 1
+
+
+def test_deep_scan_throttles_every_langextract_chunk_not_just_the_outer_call(monkeypatch):
+    # lx.extract() can fan out into several concurrent per-chunk calls --
+    # each chunk must throttle on its own, not just the outer call.
+    from app import deep_scan
+
+    calls = {"n": 0}
+    monkeypatch.setattr(deep_scan.gemini_limiter, "acquire", lambda: calls.__setitem__("n", calls["n"] + 1))
+
+    def fake_original(self, prompt, config):
+        return f"handled: {prompt}"
+
+    monkeypatch.setattr(deep_scan, "_original_process_single_prompt", fake_original)
+
+    result_a = deep_scan.GeminiLanguageModel._process_single_prompt(object(), "chunk A", {})
+    result_b = deep_scan.GeminiLanguageModel._process_single_prompt(object(), "chunk B", {})
+
+    assert result_a == "handled: chunk A"
+    assert result_b == "handled: chunk B"
+    assert calls["n"] == 2
+
+
+# ------------------------------------------------- shared retry (app/retry.py) ----
+# time.sleep is faked so tests don't wait out the real backoff window.
+
+
+def test_retry_backs_off_on_rate_limit_then_succeeds(monkeypatch):
+    import httpx
+    import openai
+
+    from app import retry
+
+    sleeps = []
+    monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+    fake_response = httpx.Response(
+        status_code=429, request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+    )
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise openai.RateLimitError("rate limited", response=fake_response, body=None)
+        return "recovered text"
+
+    result = retry.call_with_backoff(flaky, label="test")
+    assert result == "recovered text"
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+
+
+def test_retry_backs_off_on_gemini_503_overload_then_succeeds(monkeypatch):
+    # A Gemini 503 (google.genai.errors.ServerError) is transient too,
+    # distinct exception type from the 429 case above.
+    from google.genai import errors as genai_errors
+
+    from app import retry
+
+    sleeps = []
+    monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise genai_errors.ServerError(
+                503,
+                {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}},
+            )
+        return "recovered text"
+
+    result = retry.call_with_backoff(flaky, label="test")
+    assert result == "recovered text"
+    assert calls["n"] == 2
+    assert sleeps == [3]
+
+
+def test_retry_permanent_errors_fail_immediately_not_just_rate_limit(monkeypatch):
+    # 401/404 are not transient -- must not retry.
+    import httpx
+    import openai
+    from google.genai import errors as genai_errors
+
+    from app import retry
+
+    monkeypatch.setattr(retry.time, "sleep", lambda s: (_ for _ in ()).throw(
+        AssertionError("must not sleep/retry on a permanent error")
+    ))
+
+    fake_401 = httpx.Response(
+        status_code=401, request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+    )
+    try:
+        retry.call_with_backoff(
+            lambda: (_ for _ in ()).throw(
+                openai.AuthenticationError("bad key", response=fake_401, body=None)
+            ),
+            label="test",
+        )
+        assert False, "expected AuthenticationError to propagate"
+    except openai.AuthenticationError:
+        pass
+
+    try:
+        retry.call_with_backoff(
+            lambda: (_ for _ in ()).throw(
+                genai_errors.ClientError(404, {"error": {"code": 404, "message": "not found"}})
+            ),
+            label="test",
+        )
+        assert False, "expected ClientError to propagate"
+    except genai_errors.ClientError:
+        pass
+
+
+def test_retry_gives_up_after_max_attempts(monkeypatch):
+    import httpx
+    import openai
+
+    from app import retry
+
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    fake_response = httpx.Response(
+        status_code=429, request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+    )
+
+    def always_limited():
+        raise openai.RateLimitError("rate limited", response=fake_response, body=None)
+
+    try:
+        retry.call_with_backoff(always_limited, label="test")
+        assert False, "expected RateLimitError to propagate after exhausting retries"
+    except openai.RateLimitError:
+        pass
+
+
+def test_retry_non_transient_error_fails_immediately(monkeypatch):
+    from app import retry
+
+    calls = {"n": 0}
+
+    def _boom():
+        calls["n"] += 1
+        raise ValueError("not a rate limit error")
+
+    try:
+        retry.call_with_backoff(_boom, label="test")
+        assert False, "expected immediate failure, no retry"
+    except ValueError:
+        pass
+    assert calls["n"] == 1
+
+
+def test_ocr_image_via_api_rejects_unknown_engine():
+    from app import ocr_api
+
+    try:
+        ocr_api.ocr_image_via_api("deepseek", b"fake")
+        assert False, "expected ValueError for an unregistered engine"
+    except ValueError:
+        pass
+
+
+def test_list_openai_style_models_filters_non_vision_families(monkeypatch):
+    # /v1/models has no capability flag -- exclusion list must still filter
+    # out whisper/embedding models from the OCR picker.
+    from app import ocr_api
+
+    class FakeModel:
+        def __init__(self, id):
+            self.id = id
+
+    class FakeModels:
+        def list(self):
+            return [
+                FakeModel("gpt-5.6"),
+                FakeModel("whisper-1"),
+                FakeModel("text-embedding-3-large"),
+            ]
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.models = FakeModels()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    monkeypatch.setattr(ocr_api, "OpenAI", FakeClient)
+    models, status = ocr_api.list_openai_style_models(api_key_env="OPENAI_API_KEY", base_url=None)
+    assert status == "ok"
+    assert models == ["gpt-5.6"]
+
+
+def test_list_openai_style_models_reports_error_on_failure(monkeypatch):
+    from app import ocr_api
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    monkeypatch.setattr(ocr_api, "OpenAI", FakeClient)
+    models, status = ocr_api.list_openai_style_models(api_key_env="OPENAI_API_KEY", base_url=None)
+    assert status == "skipped_error"
+    assert models == []
+
+
+# ------------------------------------------------------ OCR with boxes ----
+# app/redact.py's scanned-PDF path -- ocr_words_via_api and its helpers.
+
+
+def test_parse_bbox_json_strips_markdown_code_fence():
+    from app.ocr_api import _parse_bbox_json
+
+    raw = '```json\n[{"text": "hi", "box_2d": [1,2,3,4]}]\n```'
+    assert _parse_bbox_json(raw) == [{"text": "hi", "box_2d": [1, 2, 3, 4]}]
+
+
+def test_parse_bbox_json_plain_array_no_fence():
+    from app.ocr_api import _parse_bbox_json
+
+    assert _parse_bbox_json('[{"text": "hi", "box_2d": [1,2,3,4]}]') == [
+        {"text": "hi", "box_2d": [1, 2, 3, 4]}
+    ]
+
+
+def test_parse_bbox_json_tolerates_raw_control_character_in_string():
+    # Gemini sometimes emits a raw newline instead of "\n" -- must not
+    # reject the whole response over it.
+    from app.ocr_api import _parse_bbox_json
+
+    raw = '[{"text": "line one\nline two", "box_2d": [1,2,3,4]}]'
+    assert _parse_bbox_json(raw) == [
+        {"text": "line one\nline two", "box_2d": [1, 2, 3, 4]}
+    ]
+
+
+def test_items_to_words_converts_gemini_normalized_coords():
+    from app.ocr_api import _items_to_words
+
+    items = [{"text": "Contact john@example.com", "box_2d": [100, 200, 150, 800]}]
+    words = _items_to_words(items, width=1000, height=2000, coord_order="ymin_xmin_ymax_xmax", scale=1000)
+    assert words == [("Contact john@example.com", (200.0, 200.0, 800.0, 300.0))]
+
+
+def test_items_to_words_converts_openai_normalized_coords():
+    from app.ocr_api import _items_to_words
+
+    items = [{"text": "foo", "box_2d": [10, 20, 30, 40]}]
+    words = _items_to_words(items, width=999, height=999, coord_order="xmin_ymin_xmax_ymax", scale=999)
+    assert words == [("foo", (10.0, 20.0, 30.0, 40.0))]
+
+
+def test_items_to_words_skips_malformed_entries():
+    from app.ocr_api import _items_to_words
+
+    items = [
+        {"text": "", "box_2d": [1, 2, 3, 4]},  # empty text
+        {"text": "ok", "box_2d": [1, 2, 3]},  # wrong length
+        {"text": "ok", "box_2d": ["a", "b", "c", "d"]},  # non-numeric
+        "not even a dict",
+        {"text": "good", "box_2d": [0, 0, 10, 10]},
+    ]
+    words = _items_to_words(items, width=100, height=100, coord_order="xmin_ymin_xmax_ymax", scale=100)
+    assert [w.text for w in words] == ["good"]
+
+
+def test_items_to_words_tolerates_gemini_key_drift(monkeypatch):
+    # Gemini sometimes emits "label"/"box" instead of "text"/"box_2d" --
+    # every combination here must still parse.
+    from app.ocr_api import _items_to_words
+
+    items = [
+        {"text": "line via text key", "box_2d": [1, 2, 3, 4]},
+        {"label": "line via label key, box_2d key", "box_2d": [5, 6, 7, 8]},
+        {"text": "line via text key, box key", "box": [9, 10, 11, 12]},
+        {"label": "line via label key, box key", "box": [13, 14, 15, 16]},
+    ]
+    words = _items_to_words(items, width=100, height=100, coord_order="xmin_ymin_xmax_ymax", scale=100)
+    assert [w.text for w in words] == [
+        "line via text key",
+        "line via label key, box_2d key",
+        "line via text key, box key",
+        "line via label key, box key",
+    ]
+
+
+def test_ocr_words_via_api_gemini_parses_real_sdk_call(monkeypatch):
+    from app import ocr_api
+
+    class FakeResponse:
+        text = '[{"text": "Contact john@example.com", "box_2d": [100, 100, 200, 900]}]'
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.models = FakeModels()
+
+    monkeypatch.setattr(ocr_api, "genai", type("G", (), {"Client": FakeClient})())
+    monkeypatch.setattr(ocr_api, "_image_size", lambda png_bytes: (1000, 1000))
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key")
+
+    words = ocr_api.ocr_words_via_api("gemini", b"fake-png")
+    assert len(words) == 1
+    assert words[0].text == "Contact john@example.com"
+    assert words[0].bbox == (100.0, 100.0, 900.0, 200.0)
+
+
+def test_ocr_words_via_api_openai_parses_real_sdk_call(monkeypatch):
+    from app import ocr_api
+
+    class FakeResponse:
+        output_text = '[{"text": "Contact john@example.com", "box_2d": [100, 100, 900, 200]}]'
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(ocr_api, "OpenAI", FakeClient)
+    monkeypatch.setattr(ocr_api, "_image_size", lambda png_bytes: (999, 999))
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+
+    words = ocr_api.ocr_words_via_api("openai", b"fake-png")
+    assert len(words) == 1
+    assert words[0].text == "Contact john@example.com"
+    assert words[0].bbox == (100.0, 100.0, 900.0, 200.0)
+
+
+def test_ocr_words_via_api_no_key_raises_not_configured(monkeypatch):
+    from app.ocr_api import OcrApiNotConfigured, ocr_words_via_api
+
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    try:
+        ocr_words_via_api("grok", b"fake-png")
+        assert False, "expected OcrApiNotConfigured"
+    except OcrApiNotConfigured as exc:
+        assert exc.env_var == "XAI_API_KEY"
 
 
 # ---------------------------------------------------- round 2 categories ----
@@ -343,9 +1323,7 @@ def test_financial_credential_with_banking_context_outscores_bare(scan):
 
 
 # ------------------------------------------------------------- deep scan ----
-# app.scanning imports run_deep_scan via `from app.deep_scan import run_deep_scan`,
-# so patches must target app.scanning.run_deep_scan (the bound name in that
-# module's namespace), not app.deep_scan.run_deep_scan.
+# Patches target app.scanning.run_deep_scan, the bound name it imports.
 
 
 def test_deep_scan_off_by_default_never_calls_langextract(client, api_key, monkeypatch):
@@ -381,12 +1359,7 @@ def test_deep_scan_merges_successful_extraction(client, api_key, monkeypatch):
 
 
 def test_deep_scan_organization_examples_are_well_formed():
-    # Sanity check on the few-shot data itself: added to fix a documented,
-    # explicitly-not-fixed limitation of the free/default path (underthesea
-    # NER truncates Vietnamese company names) -- verified for real against
-    # the live Gemini API when this was built (not part of this offline
-    # check, since that needs a real network call and API key), this just
-    # guards against a future edit breaking the example data's shape.
+    # Guards against a future edit breaking the few-shot example data's shape.
     from app.deep_scan import EXAMPLES
 
     org_extractions = [
@@ -400,10 +1373,47 @@ def test_deep_scan_organization_examples_are_well_formed():
         assert ext.extraction_text.startswith("Công ty")
 
 
+# Every value class deep_scan's EXAMPLES should cover. Not derived from
+# recognizers.yaml, so a future edit that drops a class's example fails loud.
+_EXPECTED_DEEP_SCAN_VALUE_CLASSES = {
+    "ORGANIZATION", "PERSON", "LOCATION",
+    "EMAIL_ADDRESS", "PHONE_NUMBER", "URL", "IP_ADDRESS", "CREDIT_CARD",
+    "IBAN_CODE", "CRYPTO", "MAC_ADDRESS", "US_SSN",
+    "CONTRACT_ID", "INTERNAL_TAX_CODE", "FINANCIAL_METRIC", "EMPLOYEE_ID",
+    "INFRA_SECRET", "IP_SENSITIVE_MARKER", "CRYPTO_PRIVATE_KEY",
+    "INFRA_NETWORK_MAP", "GPS_LOCATION", "FINANCIAL_CREDENTIAL",
+    "VN_NATIONAL_ID", "BANK_ACCOUNT_NUMBER", "FULL_ADDRESS",
+}
+
+
+def test_deep_scan_examples_are_grounded_and_cover_every_expected_class():
+    # langextract silently drops an extraction whose text isn't an exact
+    # substring of its example -- a typo here would fail silently.
+    from app.deep_scan import EXAMPLES
+
+    seen_classes = set()
+    for ex in EXAMPLES:
+        for ext in ex.extractions:
+            assert ext.extraction_text in ex.text, (
+                f"{ext.extraction_class!r} extraction_text is not a verbatim "
+                f"substring of its example text -- would silently fail to "
+                f"ground against the real API"
+            )
+            seen_classes.add(ext.extraction_class)
+
+    missing = _EXPECTED_DEEP_SCAN_VALUE_CLASSES - seen_classes
+    assert not missing, f"no example teaches these classes: {sorted(missing)}"
+
+
+def test_deep_scan_overlap_types_matches_examples_coverage(monkeypatch):
+    # _DEEP_SCAN_OVERLAP_TYPES must cover every class deep_scan can produce,
+    # or an overlapping finding would sit duplicated instead of replacing it.
+    from app import scanning
+
+    assert _EXPECTED_DEEP_SCAN_VALUE_CLASSES <= scanning._DEEP_SCAN_OVERLAP_TYPES
+
+
 def test_deep_scan_organization_merges_into_response(client, api_key, monkeypatch):
-    # Full-company-name extraction only runs when deep_scan=true is
-    # explicitly requested -- the free/default regex+NER path is unchanged
-    # (still has the documented truncation limitation on its own).
     def _fake(text, model_id=None):
         idx = text.index("Công ty")
         entity = DetectedEntity(
@@ -428,20 +1438,15 @@ def test_deep_scan_organization_merges_into_response(client, api_key, monkeypatc
     assert body["deep_scan_status"] == "ok"
     entities = {(e["entity_type"], e["text_val"]) for e in body["detected_entities"]}
     assert ("ORGANIZATION", "Công ty Cổ phần Đầu Tư Toàn Cầu") in entities
-    # The free regex+NER path finds "Toàn Cầu" as its own (wrong-type,
-    # truncated) LOCATION on this exact text -- deep scan's overlapping,
-    # fuller ORGANIZATION should replace it, not sit alongside it.
+    # Free-path truncated LOCATION must be replaced, not sit alongside it.
     assert ("LOCATION", "Toàn Cầu") not in entities
 
 
 def test_deep_scan_overlap_dedup_does_not_drop_unrelated_nested_entities(
     client, api_key, monkeypatch
 ):
-    # Guard against the overlap-based dedup above being too aggressive:
-    # HR_SENSITIVE_CONTENT/IP_TRADE_SECRET_CONTENT flag a whole sentence and
-    # routinely contain a PHONE_NUMBER or similar mentioned inside it --
-    # that's a separate real finding, not a competing interpretation of the
-    # same value, and must never be dropped just for being inside the span.
+    # A PHONE_NUMBER nested inside an HR_SENSITIVE_CONTENT sentence is a
+    # separate finding and must survive the overlap dedup above.
     text = "Nhân viên bị khiển trách do vi phạm, SĐT liên hệ 0912345678."
 
     def _fake(text, model_id=None):
@@ -466,9 +1471,6 @@ def test_deep_scan_overlap_dedup_does_not_drop_unrelated_nested_entities(
 
 
 def test_anonymize_masks_deep_scan_organization(client, api_key, monkeypatch):
-    # anonymize=true used to only mask the free regex/NER path -- deep
-    # scan's ORGANIZATION now feeds into it too, converted back to a
-    # RecognizerResult since that's what AnonymizerEngine understands.
     text = "đại diện Công ty Cổ phần Đầu Tư Toàn Cầu."
 
     def _fake(text, model_id=None):
@@ -496,12 +1498,8 @@ def test_anonymize_masks_deep_scan_organization(client, api_key, monkeypatch):
 def test_anonymize_does_not_swallow_sentence_around_hr_sensitive_content(
     client, api_key, monkeypatch
 ):
-    # HR_SENSITIVE_CONTENT/IP_TRADE_SECRET_CONTENT flag a whole sentence's
-    # topic, not a specific value -- must not be fed into AnonymizerEngine,
-    # which resolves overlapping spans by letting the wider one win
-    # (verified directly): including this would silently swallow the real
-    # PHONE_NUMBER mentioned inside it into one opaque
-    # "<HR_SENSITIVE_CONTENT>" tag, destroying the sentence structure.
+    # HR_SENSITIVE_CONTENT flags a topic, not a value -- must not feed into
+    # AnonymizerEngine, or it'd swallow the nested PHONE_NUMBER into one tag.
     text = "Nhân viên bị khiển trách do vi phạm, SĐT liên hệ 0912345678."
 
     def _fake(text, model_id=None):
@@ -558,11 +1556,8 @@ def test_deep_scan_quota_exceeded_after_cap(client, monkeypatch):
 
 
 def test_run_deep_scan_retries_once_on_langextract_race_then_succeeds(monkeypatch):
-    # Unit-level test of app.deep_scan.run_deep_scan itself (not the
-    # app.scanning wrapper) -- exercises the retry loop, not the fallback
-    # behavior around it. Simulates the real bug found in this codebase:
     # langextract's Gemini provider intermittently raises on schema
-    # validation, then succeeds on immediate retry with identical inputs.
+    # validation, then succeeds on immediate retry.
     from app import deep_scan
 
     calls = {"n": 0}
@@ -598,6 +1593,41 @@ def test_run_deep_scan_gives_up_after_max_attempts(monkeypatch):
     entities, status = deep_scan.run_deep_scan("some text")
     assert status == "skipped_error"
     assert calls["n"] == deep_scan._MAX_ATTEMPTS
+
+
+def test_run_deep_scan_backs_off_on_rate_limit_then_succeeds(monkeypatch):
+    # A real RPM limit (InferenceRuntimeError wrapping ClientError(429) in
+    # .original) needs a backoff sleep, unlike the schema race above.
+    from google.genai import errors as genai_errors
+
+    from app import deep_scan
+
+    sleeps = []
+    monkeypatch.setattr(deep_scan.time, "sleep", lambda s: sleeps.append(s))
+
+    calls = {"n": 0}
+
+    def flaky_extract(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise deep_scan.lx.exceptions.InferenceRuntimeError(
+                "Gemini API error: 429",
+                original=genai_errors.ClientError(
+                    429, {"error": {"code": 429, "message": "rate limited"}}
+                ),
+            )
+
+        class FakeResult:
+            extractions = []
+
+        return FakeResult()
+
+    monkeypatch.setenv("LANGEXTRACT_API_KEY", "fake-key")
+    monkeypatch.setattr(deep_scan.lx, "extract", flaky_extract)
+    entities, status = deep_scan.run_deep_scan("some text")
+    assert status == "ok"
+    assert calls["n"] == 2
+    assert sleeps == [deep_scan.BACKOFF_SECONDS[0]]
 
 
 def test_deep_scan_model_override_passed_through(client, api_key, monkeypatch):
@@ -643,7 +1673,6 @@ def test_deep_scan_models_endpoint_requires_auth(client):
 
 
 # ------------------------------------------ real-document findings fix ----
-# Found by scanning an actual filled-in contract PDF, not hypothetical.
 
 
 def test_vn_mobile_number_detected_as_phone(scan):
@@ -668,24 +1697,64 @@ def test_vn_national_id_context_outscores_bare_digits(scan):
 
 
 def test_exact_span_duplicate_across_categories_keeps_only_highest_score(scan):
-    # Presidio's built-in PhoneRecognizer (kept at its full default region
-    # list on purpose -- see app/scanning.py's _drop_lower_scored_exact_
-    # duplicates docstring for why narrowing it was rejected) also matches
-    # a VN national ID's digit shape under some other region's numbering
-    # plan, always at a lower score than the correct category. The
-    # lower-scoring PHONE_NUMBER duplicate on the exact same span should be
-    # dropped, not shown alongside the correct VN_NATIONAL_ID hit.
+    # PhoneRecognizer also matches a VN national ID's digit shape at a
+    # lower score -- the duplicate on the exact same span must be dropped.
     resp = scan("Số CCCD: 051195344431 cấp tại Hà Nội.", confidence_threshold=0.3)
     entities = resp.json()["detected_entities"]
     same_span = [e for e in entities if e["location"]["start"] == 9 and e["location"]["end"] == 21]
     assert {e["entity_type"] for e in same_span} == {"VN_NATIONAL_ID"}
 
 
+# --------------------------------------- 4 categories added while fixing ----
+
+
+def test_detects_old_cmnd_9_digit_with_context(scan):
+    resp = scan("CMND/Hộ chiếu số: 371775053 do CA Kiên Giang cấp.", confidence_threshold=0.3)
+    assert "VN_NATIONAL_ID" in entity_types(resp)
+
+
+def test_bare_9_digit_number_needs_context_to_clear_default_threshold(scan):
+    resp = scan("Mã đơn hàng: 123456789 đã xử lý.", confidence_threshold=0.7)
+    assert "VN_NATIONAL_ID" not in entity_types(resp)
+
+
+def test_detects_contract_id_number_first_format(scan):
+    # "14/2014/HĐCBL" -- serial/year/abbreviation, reverse of HD-YYYY-XXX.
+    resp = scan("Hợp đồng cấp bảo lãnh số 14/2014/HĐCBL đã ký.", confidence_threshold=0.5)
+    assert "CONTRACT_ID" in entity_types(resp)
+
+
+def test_detects_bank_account_number_with_context(scan):
+    resp = scan("Số tài khoản: 0091000099412 tại Vietcombank.", confidence_threshold=0.3)
+    assert "BANK_ACCOUNT_NUMBER" in entity_types(resp)
+
+
+def test_detects_grouped_bank_account_number(scan):
+    resp = scan("Tài khoản số: 341.0100.00041 dùng để nhận tiền bảo lãnh.", confidence_threshold=0.3)
+    assert "BANK_ACCOUNT_NUMBER" in entity_types(resp)
+
+
+def test_detects_full_street_address(scan):
+    resp = scan(
+        "Địa chỉ: Số 89, đường 3/2, phường Vĩnh Bảo, Thành phố Rạch Giá, tỉnh Kiên Giang.",
+        confidence_threshold=0.3,
+    )
+    entities = resp.json()["detected_entities"]
+    addr = next((e for e in entities if e["entity_type"] == "FULL_ADDRESS"), None)
+    assert addr is not None, "expected a FULL_ADDRESS hit"
+    assert "Kiên Giang" in addr["text_val"] and "Số 89" in addr["text_val"]
+
+
+def test_full_address_still_matches_when_admin_levels_are_abbreviated(scan):
+    # Real addresses often skip/abbreviate levels ("TP" instead of "thành phố").
+    resp = scan(
+        "Địa chỉ: Số 09 Huỳnh Tịnh Của, Phường Vĩnh Thanh Vân, TP Rạch Giá, Kiên Giang.",
+        confidence_threshold=0.3,
+    )
+    assert "FULL_ADDRESS" in entity_types(resp)
+
+
 def test_vietnamese_ner_now_correct_instead_of_noisy(scan):
-    # Before: SpacyRecognizer (English NER) tagged this exact sentence shape
-    # with PERSON/ORGANIZATION/LOCATION garbage on fragments like "Ông/Bà".
-    # After: SpacyRecognizer disabled, underthesea (Vietnamese-aware) added —
-    # it correctly finds the real name and the real country, not fragments.
     resp = scan(
         "Một bên là Ông/Bà: Nguyễn Xuân Hùng, Quốc tịch: Việt Nam. Chức vụ: Giám đốc điều hành.",
         confidence_threshold=0.3,
@@ -693,17 +1762,13 @@ def test_vietnamese_ner_now_correct_instead_of_noisy(scan):
     entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
     assert ("PERSON", "Nguyễn Xuân Hùng") in entities
     assert ("LOCATION", "Việt Nam") in entities
-    # Known residual imprecision, not hidden: fragments like "Ông/Bà" or
-    # "Chức vụ" must NOT also get tagged — only the real name/country.
+    # Fragments like "Ông/Bà" or "Chức vụ" must not also get tagged.
     garbage = {(t, v) for t, v in entities if v not in ("Nguyễn Xuân Hùng", "Việt Nam")}
     assert not garbage, f"unexpected NER hits: {garbage}"
 
 
 def test_vietnamese_ner_score_is_graduated_not_flat(scan):
-    # app/vi_ner.py used to hard-filter (keep/reject) then assign every kept
-    # result a flat 0.6, silently ignoring confidence_threshold. Real
-    # multi-word entities should now score meaningfully high on their own,
-    # not just "whatever passed a binary gate".
+    # Score must vary meaningfully, not a flat 0.6 for every kept result.
     resp = scan(
         "Một bên là Ông/Bà: Nguyễn Xuân Hùng, Quốc tịch: Việt Nam.",
         confidence_threshold=0.1,
@@ -718,11 +1783,7 @@ def test_vietnamese_ner_score_is_graduated_not_flat(scan):
 
 
 def test_vietnamese_ner_bullet_initial_common_word_filtered_at_normal_threshold(scan):
-    # "Được"/"Xét" are common verbs capitalized only because they start a
-    # bulleted clause, not proper nouns. Real real-document finding (this
-    # exact shape came from a labor contract's benefits section). Should
-    # score low enough to disappear at a normal operating threshold, via
-    # graduated scoring rather than a hard-coded denylist.
+    # "Được"/"Xét" are capitalized only from starting a bulleted clause.
     resp = scan(
         "- Được trả lương vào ngày 05 hàng tháng.\n- Xét nâng lương định kỳ 12 tháng/lần.",
         confidence_threshold=0.5,
@@ -733,15 +1794,8 @@ def test_vietnamese_ner_bullet_initial_common_word_filtered_at_normal_threshold(
 
 
 def test_name_split_across_newline_by_underthesea_still_recovered(scan):
-    # Real finding from a two-column-layout test document: underthesea's
-    # own tokenizer doesn't treat "\n" as a boundary, so it sometimes fuses
-    # a real name with the next line's label word into one token (here,
-    # "Trần Thị Hoa" + "Số" from the next line's "Số CCCD:"). The fused
-    # token then failed exact-substring lookup against the source text
-    # (which has a newline, not a space, between them), silently dropping
-    # the whole entity -- app/vi_ner.py's _find_token() now falls back to
-    # whitespace-flexible matching, and _split_on_newlines() then scores
-    # each line's piece on its own merits.
+    # underthesea can fuse a name with the next line's label across a "\n" --
+    # must still resolve back to the source text.
     resp = scan(
         "Nhân viên: Trần Thị Hoa\nSố CCCD: 038196045678\nPhòng ban: Kế toán",
         confidence_threshold=0.3,
@@ -751,14 +1805,8 @@ def test_name_split_across_newline_by_underthesea_still_recovered(scan):
 
 
 def test_bare_newline_before_single_word_still_penalized_as_sentence_initial(scan):
-    # Regression guard for a bug found while fixing the case above:
-    # _is_sentence_initial used to check text[:start].rstrip()[-1], which
-    # silently strips away the newline itself before checking it, so a
-    # bare line break (no punctuation before it) was never recognized as a
-    # boundary -- only a newline preceded by "." or "-" was. A single
-    # capitalized English word straight after a bare newline (e.g. a
-    # section's "Internal API key:" label) must still be penalized enough
-    # to disappear at a normal operating threshold.
+    # A bare "\n" (no preceding punctuation) must still count as a sentence
+    # boundary for the capitalization penalty.
     resp = scan(
         "Server config:\nInternal API key: sk-live-51Hh8x9AbCdEfGhIjKlMnOpQrStUvWxYz01234567",
         confidence_threshold=0.5,
@@ -768,13 +1816,72 @@ def test_bare_newline_before_single_word_still_penalized_as_sentence_initial(sca
     assert not noise, f"unexpected NER hits: {noise}"
 
 
+def test_find_token_does_not_desync_on_a_distant_unrelated_occurrence():
+    # An unbounded search could latch onto a distant unrelated occurrence of
+    # a repeated token, permanently desyncing every later lookup -- the
+    # search must be bounded to _MAX_TOKEN_LOOKAHEAD and simply fail instead.
+    from app.vi_ner import _MAX_TOKEN_LOOKAHEAD, _find_token
+
+    filler = "x" * (_MAX_TOKEN_LOOKAHEAD + 50)
+    text = f"{filler} Kiên Giang là tỉnh đẹp."
+
+    found = _find_token(text, "Kiên Giang", 0)
+    assert found is None, (
+        "must not silently match the distant unrelated occurrence — that's "
+        "exactly the jump that caused the real desync"
+    )
+
+
+def test_collapse_repeated_punctuation_shrinks_long_runs():
+    # A long dot-leader run (VN form blank-fill lines) makes underthesea
+    # silently skip tokenizing real text right after it -- collapse first.
+    from app.vi_ner import _REPEATED_PUNCT_KEEP, _collapse_repeated_punctuation
+
+    long_run = "." * 60
+    text = f"Số tiền: {long_run}\nHọ tên: Nguyễn Văn A."
+    collapsed, mapping = _collapse_repeated_punctuation(text)
+
+    assert "." * _REPEATED_PUNCT_KEEP in collapsed
+    assert "." * (_REPEATED_PUNCT_KEEP + 1) not in collapsed
+    assert "Nguyễn Văn A" in collapsed
+    assert len(collapsed) == len(mapping)
+
+
+def test_collapse_repeated_punctuation_leaves_short_runs_alone():
+    from app.vi_ner import _collapse_repeated_punctuation
+
+    text = "Giá: 1,234.56 -- xem thêm... rồi kết luận."
+    collapsed, mapping = _collapse_repeated_punctuation(text)
+    assert collapsed == text
+    assert mapping == list(range(len(text)))
+
+
+def test_collapse_repeated_punctuation_mapping_resolves_to_real_offsets():
+    from app.vi_ner import _collapse_repeated_punctuation
+
+    text = "A" + "-" * 50 + "Nguyễn Thị Mĩnh" + "-" * 50 + "B"
+    collapsed, mapping = _collapse_repeated_punctuation(text)
+    idx = collapsed.find("Nguyễn Thị Mĩnh")
+    assert idx != -1
+    start = mapping[idx]
+    end = mapping[idx + len("Nguyễn Thị Mĩnh") - 1] + 1
+    assert text[start:end] == "Nguyễn Thị Mĩnh"
+
+
+def test_compose_mappings_chains_two_transformations_with_dash_one_propagation():
+    from app.vi_ner import _compose_mappings
+
+    # first_stage: some earlier transform's text -> original text
+    first_stage = [0, 1, -1, 2, 3]  # position 2 was inserted (no origin)
+    # second_stage: final text -> first_stage's text
+    second_stage = [4, 3, 2, 0]
+    composed = _compose_mappings(second_stage, first_stage)
+    assert composed == [3, 2, -1, 0]
+
+
 def test_fused_word_no_longer_falsely_tagged(scan):
-    # Some PDF exports drop the space glyph between certain word pairs
-    # (verified via raw pymupdf word-box inspection on the real contract
-    # that surfaced this — genuinely absent from the source file, not an
-    # extraction bug). "Chếđộlàm" used to look like one Title Case word to
-    # the NER filter and get tagged PERSON/LOCATION; the DP syllable
-    # segmentation in app/vi_ner.py now splits it before tagging.
+    # Some PDF exports drop the space glyph between word pairs -- a fused
+    # run like "Chếđộlàm" must not look like one Title Case name.
     resp = scan("Điều 2: Chếđộlàm việc theo quy định công ty.", confidence_threshold=0.3)
     entities = {(e["entity_type"], e["text_val"]) for e in resp.json()["detected_entities"]}
     noise = {(t, v) for t, v in entities if t in ("PERSON", "LOCATION", "ORGANIZATION")}
@@ -782,9 +1889,6 @@ def test_fused_word_no_longer_falsely_tagged(scan):
 
 
 def test_fused_name_recovered_via_syllable_segmentation(scan):
-    # The same fusion artifact glued a real party's name into "SỹThành" in
-    # the source contract — previously invisible to NER entirely. The
-    # syllable-segmentation repair recovers the full name.
     resp = scan(
         "Và một bên là Ông/Bà: Trịnh SỹThành Quốc tịch: Đài Loan.",
         confidence_threshold=0.3,
@@ -794,8 +1898,6 @@ def test_fused_name_recovered_via_syllable_segmentation(scan):
 
 
 def test_vietnamese_ner_no_hallucination_on_fragment_only_text(scan):
-    # No real person/org/location name anywhere in this sentence — any NER
-    # hit here would be a genuine false positive, not a residual imprecision.
     resp = scan(
         "Mọi thắc mắc vui lòng liên hệ trong giờ hành chính để được hỗ trợ.",
         confidence_threshold=0.3,
@@ -804,10 +1906,7 @@ def test_vietnamese_ner_no_hallucination_on_fragment_only_text(scan):
 
 
 def test_vietnamese_day_names_rejected_not_tagged_location(scan):
-    # Real finding from a labor contract's benefits section: "Thứ Bảy",
-    # "Chủ Nhật" (Saturday, Sunday) were getting tagged LOCATION. Day names
-    # are a closed set of 7 and never PII -- rejected outright, not merely
-    # down-scored.
+    # Day names ("Thứ Bảy", "Chủ Nhật") are a closed set, never PII.
     resp = scan(
         "Nghỉ hàng tuần 02 ngày (Thứ Bảy, Chủ Nhật); nghỉ phép năm 12 ngày.",
         confidence_threshold=0.1,
@@ -818,10 +1917,8 @@ def test_vietnamese_day_names_rejected_not_tagged_location(scan):
 
 
 def test_admin_unit_prefix_corrects_type_to_location(scan):
-    # Real finding: underthesea gets the span boundary right ("Phường Thủ
-    # Thiêm") but the type wrong (tagged PERSON). "Phường" is a reliable
-    # administrative-unit signal -- corrected to LOCATION without touching
-    # the span itself.
+    # underthesea gets the span right but sometimes tags it PERSON --
+    # "Phường" is a reliable signal to correct the type to LOCATION.
     resp = scan(
         "Địa chỉ: 93A/51/223 Ngô Gia Tự, Phường Thủ Thiêm, TP. Hồ Chí Minh.",
         confidence_threshold=0.3,

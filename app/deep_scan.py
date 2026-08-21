@@ -1,91 +1,99 @@
-"""Optional LLM-based second pass for categories regex can't reach.
+"""Optional LLM verification pass -- opt-in (app/scanning.py's deep_scan
+flag), every call spends real Gemini quota. Covers every recognizer
+category, not just the two content-flag ones regex can't reach at all
+(see PROMPT_DESCRIPTION/EXAMPLES); an overlapping finding replaces the
+regex/NER one (app/scanning.py's `_DEEP_SCAN_OVERLAP_TYPES`).
 
-The only module that imports langextract, mirroring how app/engine.py is the
-only one that imports presidio_analyzer. Never called automatically — only
-when a caller explicitly opts in (see app/scanning.py's deep_scan flag),
-because every call costs a Gemini free-tier request, and free-tier RPM/RPD
-limits vary by model and change over time (see GET /api/v1/deep_scan/models
-and DEFAULT_MODEL_ID above — don't trust a number hardcoded in a comment).
-
-Pilot categories (extend by adding more ExampleData entries below, no other
-code changes needed — same story as app/recognizers/recognizers.yaml):
-  - IP_TRADE_SECRET_CONTENT: upgrades the regex-only IP_SENSITIVE_MARKER
-    (which just matches the literal word "confidential") into real detection
-    of trade-secret-shaped content — proprietary algorithms, formulas,
-    unreleased specs.
-  - HR_SENSITIVE_CONTENT: performance-review / disciplinary content, which
-    has no regex-detectable shape at all.
-
-Known bug, found by testing against sample_corpus/full_coverage_demo.txt:
-langextract 1.6.0's Gemini provider intermittently raises a pydantic
-ValidationError building its response_schema ("Extra inputs are not
-permitted" on type/properties/required) — looks like a version mismatch
-between langextract's schema construction and the installed google-genai
-SDK, and it's a race, not deterministic: the exact same call failed once
-then succeeded on immediate retry with the same text/model/key. Both
-langextract (1.6.0) and google-genai (2.18.1) were already at their latest
-release when this was found (checked via `pip index versions`), so there
-was no upstream fix to pull in — this is a genuinely open bug in the pinned
-dependency, not something this codebase was behind on. First response was
-to just degrade safely and document it (a transient failure shouldn't be
-silently retried without being asked); once "deep scan cần phải fix" became
-an explicit requirement, `run_deep_scan` now retries once
-(`_MAX_ATTEMPTS = 2`) before reporting `"skipped_error"` — a bounded,
-logged retry rather than an unbounded one, so a real outage still surfaces
-instead of retrying forever.
+Patches `GeminiLanguageModel._process_single_prompt` so `gemini_limiter`
+throttles every real per-chunk HTTP call, not just the outer
+`lx.extract()` -- langextract fires chunks at Gemini concurrently, which
+otherwise bypasses the limiter.
 """
 
 import logging
 import os
+import time
 from typing import Optional
 
 import langextract as lx
 from google import genai
+from langextract.providers.gemini import GeminiLanguageModel
 
+from app.rate_limiter import gemini_limiter
+from app.retry import BACKOFF_SECONDS, is_transient_error
 from app.schemas import DetectedEntity, EntityLocation
 
 logger = logging.getLogger("sensen.deep_scan")
 
-# "-latest" aliases track whichever model Google currently designates as
-# standard, so the default doesn't go stale the way a pinned version does —
-# found the hard way: the previously pinned "gemini-2.5-flash-lite" was
-# still callable, but Google AI Studio had already moved the visible
-# free-tier quota UI on to newer models by the time this was checked
-# (2026-08-19). Flash-Lite over plain Flash for the same reason as before:
-# more free-tier headroom for a background/opt-in pass like this.
+# lx.extract() fires chunks concurrently; throttle the real per-chunk call, not just the outer one.
+_original_process_single_prompt = GeminiLanguageModel._process_single_prompt
+
+
+def _throttled_process_single_prompt(self, prompt, config):
+    gemini_limiter.acquire()
+    return _original_process_single_prompt(self, prompt, config)
+
+
+GeminiLanguageModel._process_single_prompt = _throttled_process_single_prompt
+
+# "-latest" alias so the default doesn't go stale as Google rotates models.
 DEFAULT_MODEL_ID = "gemini-flash-lite-latest"
 
-# Coarse allowlist for the ?model= override (see list_available_models() and
-# GET /api/v1/deep_scan/models): only plain-text Gemini models, not image/
-# audio/tooling variants that exist under the same "gemini-" prefix but
-# don't fit langextract's text-in/text-out extraction use case.
+# Excludes non-text Gemini variants (image/tts/etc.) sharing the "gemini-" prefix.
 _EXCLUDED_MODEL_SUBSTRINGS = (
     "image", "tts", "robotics", "computer-use", "customtools", "omni",
 )
 
-# LangExtract doesn't produce a Presidio-style calibrated confidence score;
-# this is a fixed placeholder until real precision/recall data justifies
-# something more granular.
+# langextract has no calibrated confidence score; fixed placeholder.
 DEEP_SCAN_SCORE = 0.6
 
-# Retries the known intermittent langextract schema-validation race (see
-# module docstring) once before giving up — verified this is a real race,
-# not a deterministic failure: the identical call failed once and succeeded
-# on immediate retry with the same text/model/key.
-_MAX_ATTEMPTS = 2
+# One shot for the schema-validation race, one for a backed-off retry, one spare.
+_MAX_ATTEMPTS = 3
 
 PROMPT_DESCRIPTION = (
-    "Identify sentences or clauses that disclose a company trade secret "
+    "Identify every sensitive item in the text and label it with the exact "
+    "extraction_class listed below. For the two content-flag classes, "
+    "extract the whole sentence/clause verbatim, since they flag a topic, "
+    "not a value. For every other class, extract only the value itself, "
+    "verbatim, the shortest exact substring that is the value (no "
+    "surrounding words). Extract every instance found, even several of the "
+    "same class in one text. Never invent a value that is not verbatim in "
+    "the text; skip a class entirely if the text doesn't contain one.\n\n"
+    "Content-flag classes (extract the whole sentence):\n"
+    "- IP_TRADE_SECRET_CONTENT: discloses a company trade secret "
     "(proprietary algorithms, formulas, unreleased product specs, "
-    "manufacturing know-how) as IP_TRADE_SECRET_CONTENT, that discuss "
-    "sensitive HR matters (performance reviews, disciplinary action, "
-    "employee complaints) as HR_SENSITIVE_CONTENT, or that name a "
-    "Vietnamese company with its full legal entity type (e.g. 'Công ty "
-    "TNHH X', 'Công ty Cổ phần Y', 'Tập đoàn Z') as ORGANIZATION. For "
-    "IP_TRADE_SECRET_CONTENT and HR_SENSITIVE_CONTENT, extract the exact "
-    "sentence containing the sensitive content, verbatim. For "
-    "ORGANIZATION, extract only the company name phrase itself (including "
-    "its legal entity type prefix), not any surrounding text."
+    "manufacturing know-how).\n"
+    "- HR_SENSITIVE_CONTENT: sensitive HR matters (performance reviews, "
+    "disciplinary action, employee complaints).\n\n"
+    "Value classes (extract only the value):\n"
+    "- ORGANIZATION: a Vietnamese company's full legal name, including its "
+    "legal entity type prefix (e.g. 'Công ty TNHH X', 'Công ty Cổ phần Y', "
+    "'Tập đoàn Z').\n"
+    "- PERSON: a real person's full name.\n"
+    "- LOCATION: a real place name (city, province, district, ward, "
+    "country, landmark).\n"
+    "- EMAIL_ADDRESS, PHONE_NUMBER, URL, IP_ADDRESS, CREDIT_CARD, "
+    "IBAN_CODE, CRYPTO (a cryptocurrency wallet address), MAC_ADDRESS, "
+    "US_SSN: standard identifiers/contact info, in their usual written "
+    "form.\n"
+    "- CONTRACT_ID: a contract/agreement reference number or code.\n"
+    "- INTERNAL_TAX_CODE: a Vietnamese business tax code (mã số thuế).\n"
+    "- FINANCIAL_METRIC: a specific monetary amount (salary, revenue, "
+    "budget, penalty, a VND/USD figure).\n"
+    "- EMPLOYEE_ID: an employee code (e.g. 'NV-004521').\n"
+    "- INFRA_SECRET: an API key, access key, token, password, JWT, or "
+    "database connection string.\n"
+    "- IP_SENSITIVE_MARKER: a confidentiality marker phrase "
+    "('confidential', 'bí mật kinh doanh', 'tài liệu mật', 'internal use "
+    "only').\n"
+    "- CRYPTO_PRIVATE_KEY: a PEM private key block header/body.\n"
+    "- INFRA_NETWORK_MAP: an internal IP address, subnet, or CIDR block.\n"
+    "- GPS_LOCATION: a decimal latitude/longitude coordinate pair.\n"
+    "- FINANCIAL_CREDENTIAL: an assigned banking PIN, OTP, or password.\n"
+    "- VN_NATIONAL_ID: a Vietnamese CCCD/CMND national ID number.\n"
+    "- BANK_ACCOUNT_NUMBER: a bank account number.\n"
+    "- FULL_ADDRESS: a full Vietnamese street address (house number "
+    "through ward/district/city/province)."
 )
 
 EXAMPLES = [
@@ -153,16 +161,7 @@ EXAMPLES = [
             )
         ],
     ),
-    # ORGANIZATION: added because the regex-free default path (underthesea
-    # NER in app/vi_ner.py) has a documented, explicitly-not-fixed limit —
-    # it often truncates a Vietnamese company name to its last 1-2 words
-    # and/or mistypes it as LOCATION, because there's no reliable "end of
-    # proper name" delimiter available to a regex/NER approach here (see
-    # README Known Limitations for the full investigation). An LLM doesn't
-    # have that problem — it can use real semantic understanding of what a
-    # company name is, not just capitalization. This only runs when the
-    # caller opts into deep_scan=true, so it doesn't change the free/
-    # default path's behavior at all — see module docstring above.
+    # ORGANIZATION: underthesea's NER often truncates/mistypes VN company names.
     lx.data.ExampleData(
         text=(
             "Đại diện cho Công ty TNHH Thiên Phú và bà Nguyễn Thị Lan Anh, "
@@ -184,6 +183,135 @@ EXAMPLES = [
             )
         ],
     ),
+    # PERSON/LOCATION: same underthesea weakness as ORGANIZATION above.
+    lx.data.ExampleData(
+        text=(
+            "Ông Trần Văn Bình đã ký hợp đồng tại Đà Nẵng trước sự chứng "
+            "kiến của bà Lê Thị Hoa."
+        ),
+        extractions=[
+            lx.data.Extraction(extraction_class="PERSON", extraction_text="Trần Văn Bình"),
+            lx.data.Extraction(extraction_class="LOCATION", extraction_text="Đà Nẵng"),
+            lx.data.Extraction(extraction_class="PERSON", extraction_text="Lê Thị Hoa"),
+        ],
+    ),
+    # Remaining examples cover every other recognizer value class, grouped
+    # into realistic multi-entity snippets rather than one per class.
+    lx.data.ExampleData(
+        text=(
+            "Nguyễn Văn A, số CCCD 079203001234, địa chỉ Số 12, đường Lê "
+            "Lợi, phường Bến Nghé, quận 1, Thành phố Hồ Chí Minh, điện "
+            "thoại 0912345678, email nguyenvana@example.com, số tài khoản "
+            "0071000123456 tại Vietcombank."
+        ),
+        extractions=[
+            lx.data.Extraction(extraction_class="PERSON", extraction_text="Nguyễn Văn A"),
+            lx.data.Extraction(extraction_class="VN_NATIONAL_ID", extraction_text="079203001234"),
+            lx.data.Extraction(
+                extraction_class="FULL_ADDRESS",
+                extraction_text=(
+                    "Số 12, đường Lê Lợi, phường Bến Nghé, quận 1, Thành "
+                    "phố Hồ Chí Minh"
+                ),
+            ),
+            lx.data.Extraction(extraction_class="PHONE_NUMBER", extraction_text="0912345678"),
+            lx.data.Extraction(
+                extraction_class="EMAIL_ADDRESS", extraction_text="nguyenvana@example.com"
+            ),
+            lx.data.Extraction(
+                extraction_class="BANK_ACCOUNT_NUMBER", extraction_text="0071000123456"
+            ),
+        ],
+    ),
+    lx.data.ExampleData(
+        text=(
+            "Hợp đồng số HD-2026-0142 giữa Công ty TNHH ABC (MST "
+            "0312345678) quy định mức phạt vi phạm là 50.000.000 VND."
+        ),
+        extractions=[
+            lx.data.Extraction(extraction_class="CONTRACT_ID", extraction_text="HD-2026-0142"),
+            lx.data.Extraction(extraction_class="ORGANIZATION", extraction_text="Công ty TNHH ABC"),
+            lx.data.Extraction(extraction_class="INTERNAL_TAX_CODE", extraction_text="0312345678"),
+            lx.data.Extraction(
+                extraction_class="FINANCIAL_METRIC", extraction_text="50.000.000 VND"
+            ),
+        ],
+    ),
+    lx.data.ExampleData(
+        text="Nhân viên mã số NV-004521 đã hoàn tất thủ tục chấm công tháng này.",
+        extractions=[
+            lx.data.Extraction(extraction_class="EMPLOYEE_ID", extraction_text="NV-004521"),
+        ],
+    ),
+    lx.data.ExampleData(
+        text=(
+            "Server nội bộ tại 10.0.5.12/24 dùng khóa "
+            "AKIA1234567890ABCDEF để truy cập, và khối khóa riêng bắt đầu "
+            "bằng -----BEGIN RSA PRIVATE KEY-----."
+        ),
+        extractions=[
+            lx.data.Extraction(
+                extraction_class="INFRA_NETWORK_MAP", extraction_text="10.0.5.12/24"
+            ),
+            lx.data.Extraction(
+                extraction_class="INFRA_SECRET", extraction_text="AKIA1234567890ABCDEF"
+            ),
+            lx.data.Extraction(
+                extraction_class="CRYPTO_PRIVATE_KEY",
+                extraction_text="-----BEGIN RSA PRIVATE KEY-----",
+            ),
+        ],
+    ),
+    lx.data.ExampleData(
+        text=(
+            "Toạ độ kho hàng là 10.762622, 106.660172; mật khẩu ứng dụng "
+            "ngân hàng là: A1b2C3d4."
+        ),
+        extractions=[
+            lx.data.Extraction(
+                extraction_class="GPS_LOCATION", extraction_text="10.762622, 106.660172"
+            ),
+            lx.data.Extraction(
+                extraction_class="FINANCIAL_CREDENTIAL", extraction_text="A1b2C3d4"
+            ),
+        ],
+    ),
+    lx.data.ExampleData(
+        text=(
+            "Card 4111 1111 1111 1111 was charged; wire to IBAN GB29 NWBK "
+            "6016 1331 9268 19; wallet address "
+            "9xQFvVQyq4jVQmXHXY9Bz2WvHc5UGZpN3T; device MAC "
+            "00:1A:2B:3C:4D:5E; SSN 123-45-6789; see "
+            "https://example.com/portal from IP 203.0.113.7."
+        ),
+        extractions=[
+            lx.data.Extraction(
+                extraction_class="CREDIT_CARD", extraction_text="4111 1111 1111 1111"
+            ),
+            lx.data.Extraction(
+                extraction_class="IBAN_CODE", extraction_text="GB29 NWBK 6016 1331 9268 19"
+            ),
+            lx.data.Extraction(
+                extraction_class="CRYPTO", extraction_text="9xQFvVQyq4jVQmXHXY9Bz2WvHc5UGZpN3T"
+            ),
+            lx.data.Extraction(
+                extraction_class="MAC_ADDRESS", extraction_text="00:1A:2B:3C:4D:5E"
+            ),
+            lx.data.Extraction(extraction_class="US_SSN", extraction_text="123-45-6789"),
+            lx.data.Extraction(
+                extraction_class="URL", extraction_text="https://example.com/portal"
+            ),
+            lx.data.Extraction(extraction_class="IP_ADDRESS", extraction_text="203.0.113.7"),
+        ],
+    ),
+    lx.data.ExampleData(
+        text="Tài liệu này được đánh dấu là bí mật kinh doanh, không được sao chép.",
+        extractions=[
+            lx.data.Extraction(
+                extraction_class="IP_SENSITIVE_MARKER", extraction_text="bí mật kinh doanh"
+            ),
+        ],
+    ),
 ]
 
 
@@ -196,14 +324,9 @@ def _is_usable_text_model(name: str) -> bool:
 
 
 def list_available_models() -> tuple[list[str], str]:
-    """List Gemini text-extraction-capable model ids callable with the
-    server's key, for the /api/v1/deep_scan/models endpoint. Never raises —
-    same (result, status) contract as run_deep_scan, reusing the same status
-    vocabulary ("ok" / "skipped_no_key" / "skipped_error").
-
-    Live-queried rather than a hardcoded list on purpose: found firsthand
-    while building this that pinned model ids go stale within months (see
-    DEFAULT_MODEL_ID above) — a static list here would just repeat that.
+    """List Gemini text-extraction models available to the server's key.
+    Never raises -- same (result, status) contract as run_deep_scan.
+    Live-queried since pinned model ids go stale within months.
     """
     api_key = os.getenv("LANGEXTRACT_API_KEY")
     if not api_key:
@@ -228,14 +351,9 @@ def list_available_models() -> tuple[list[str], str]:
 def run_deep_scan(text: str, model_id: Optional[str] = None) -> tuple[list[DetectedEntity], str]:
     """Run the LLM extraction pass. Never raises.
 
-    Returns (entities, status) where status is one of "ok" (call succeeded,
-    entities may still be empty if nothing was found), "skipped_no_key", or
-    "skipped_error" — the caller needs this distinction to report an honest
-    deep_scan_status, since an empty entity list alone can't tell "nothing
-    found" apart from "the call never happened". `model_id` defaults to
-    DEFAULT_MODEL_ID; an explicit override that isn't a recognized plain-text
-    Gemini model (see _is_usable_text_model) is rejected as "skipped_error"
-    before spending an API call.
+    Returns (entities, status); status is "ok", "skipped_no_key", or
+    "skipped_error" -- an empty entity list alone can't distinguish
+    "nothing found" from "the call never happened".
     """
     api_key = os.getenv("LANGEXTRACT_API_KEY")
     if not api_key:
@@ -249,6 +367,7 @@ def run_deep_scan(text: str, model_id: Optional[str] = None) -> tuple[list[Detec
     result = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
+            gemini_limiter.acquire()
             result = lx.extract(
                 text_or_documents=text,
                 prompt_description=PROMPT_DESCRIPTION,
@@ -258,19 +377,35 @@ def run_deep_scan(text: str, model_id: Optional[str] = None) -> tuple[list[Detec
                 show_progress=False,
             )
             break
-        except Exception:
-            if attempt < _MAX_ATTEMPTS:
-                logger.warning(
-                    "deep_scan: langextract call failed on attempt %d/%d, retrying "
-                    "(known intermittent schema-validation race — see module docstring)",
-                    attempt, _MAX_ATTEMPTS, exc_info=True,
-                )
-            else:
+        except Exception as exc:
+            if attempt == _MAX_ATTEMPTS:
                 logger.warning(
                     "deep_scan: langextract call failed on final attempt %d/%d",
                     attempt, _MAX_ATTEMPTS, exc_info=True,
                 )
                 return [], "skipped_error"
+
+            # unwrap langextract's InferenceRuntimeError to check the real provider error
+            underlying = exc
+            if isinstance(exc, lx.exceptions.InferenceRuntimeError) and exc.original is not None:
+                underlying = exc.original
+
+            if is_transient_error(underlying):
+                delay = BACKOFF_SECONDS[attempt - 1]
+                logger.warning(
+                    "deep_scan: rate-limited/overloaded on attempt %d/%d "
+                    "(langextract's own internal retry already tried a shorter "
+                    "backoff and still failed) -- backing off %ds before retry",
+                    attempt, _MAX_ATTEMPTS, delay, exc_info=True,
+                )
+                time.sleep(delay)
+            else:
+                logger.warning(
+                    "deep_scan: langextract call failed on attempt %d/%d, retrying "
+                    "immediately (known intermittent schema-validation race — see "
+                    "module docstring)",
+                    attempt, _MAX_ATTEMPTS, exc_info=True,
+                )
 
     entities = []
     for extraction in result.extractions:

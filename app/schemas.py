@@ -75,3 +75,16 @@ class DeepScanModelsResponse(BaseModel):
     status: str = Field(description="'ok', 'skipped_no_key', or 'skipped_error' — same vocabulary as deep_scan_status")
     default_model: str
     models: list[str]
+
+
+class UsageResponse(BaseModel):
+    deep_scan_used: int
+    deep_scan_limit: int
+    ocr_api_used: int
+    ocr_api_limit: int
+
+
+class OcrModelsResponse(BaseModel):
+    status: str = Field(description="'ok', 'skipped_no_key', or 'skipped_error' — same vocabulary as deep_scan_status")
+    default_model: str
+    models: list[str]

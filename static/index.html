@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SenSen — Sensitive Data Classifier</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/static/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <style>
   :root {
     --bg: #0b0d12;
@@ -190,6 +193,7 @@
         <input type="text" id="apiKey" placeholder="Dán key hoặc đăng ký bên dưới">
       </div>
       <div class="key-status" id="keyStatus"></div>
+      <div class="key-status" id="usageStatus"></div>
       <details id="registerDetails">
         <summary>Chưa có key? Đăng ký miễn phí</summary>
         <div class="register-box">
@@ -226,6 +230,21 @@ Database connection string: postgresql://admin:S3cretPass@db.internal:5432/prod
           <div id="fileDropLabel">Kéo thả file vào đây, hoặc bấm để chọn<br><span style="font-size:11px">.pdf (kể cả bản scan, tự OCR) · .docx · .txt</span></div>
           <input type="file" id="fileInput" accept=".pdf,.docx,.txt">
         </div>
+        <div class="row" style="margin-top:8px">
+          <label for="ocrEngine">OCR engine (chỉ dùng nếu PDF là bản scan, không có lớp văn bản)</label>
+          <select id="ocrEngine">
+            <option value="local">Local — Tesseract (miễn phí, offline, mặc định)</option>
+            <option value="gemini">Gemini API (cần server cấu hình LANGEXTRACT_API_KEY)</option>
+            <option value="openai">OpenAI API (cần server cấu hình OPENAI_API_KEY)</option>
+            <option value="grok">Grok API — xAI (cần server cấu hình XAI_API_KEY)</option>
+          </select>
+          <div class="key-status">Engine trả phí đọc ảnh scan tốt hơn khi ảnh mờ/nhiễu nặng, nhưng tốn phí + gửi ảnh lên bên thứ ba + tính vào quota OCR API bên dưới.</div>
+        </div>
+        <div class="row" id="ocrModelRow" style="display:none; margin-top:8px">
+          <label for="ocrModel">Model (OCR — độc lập với model deep scan bên dưới)</label>
+          <select id="ocrModel"><option value="">— server default —</option></select>
+          <div class="key-status" id="ocrModelStatus"></div>
+        </div>
       </div>
 
       <div class="row">
@@ -249,6 +268,9 @@ Database connection string: postgresql://admin:S3cretPass@db.internal:5432/prod
       <div class="row">
         <button class="full" id="scanBtn">Quét dữ liệu nhạy cảm</button>
       </div>
+      <div class="row" id="redactRow" style="display:none">
+        <button class="full secondary" id="redactBtn">Tải file đã ẩn danh hoá (xoá thật nội dung nhạy cảm)</button>
+      </div>
       <div id="status"></div>
     </section>
   </div>
@@ -271,6 +293,7 @@ const CATEGORY_COLORS = {
   CREDIT_CARD: '#6ea8ff', IBAN_CODE: '#6ea8ff', CRYPTO: '#6ea8ff', MAC_ADDRESS: '#6ea8ff', US_SSN: '#6ea8ff',
   // Pháp lý / tài chính
   CONTRACT_ID: '#7ee0c3', INTERNAL_TAX_CODE: '#7ee0c3', FINANCIAL_METRIC: '#7ee0c3', FINANCIAL_CREDENTIAL: '#7ee0c3',
+  BANK_ACCOUNT_NUMBER: '#7ee0c3',
   // Nhân sự
   EMPLOYEE_ID: '#c9a3ff', HR_SENSITIVE_CONTENT: '#c9a3ff',
   // Hạ tầng / bảo mật
@@ -278,7 +301,7 @@ const CATEGORY_COLORS = {
   // Sở hữu trí tuệ
   IP_TRADE_SECRET_CONTENT: '#f0a35f',
   // Người / địa danh / tổ chức
-  PERSON: '#5fd6c9', LOCATION: '#5fd6c9', ORGANIZATION: '#5fd6c9', GPS_LOCATION: '#5fd6c9',
+  PERSON: '#5fd6c9', LOCATION: '#5fd6c9', ORGANIZATION: '#5fd6c9', GPS_LOCATION: '#5fd6c9', FULL_ADDRESS: '#5fd6c9',
   // VN-specific
   VN_NATIONAL_ID: '#e0c25f',
 };
@@ -316,9 +339,30 @@ function setApiKey(key, { persist = true } = {}) {
     keyStatusEl.textContent = '✓ đã lưu trên trình duyệt này';
     keyStatusEl.className = 'key-status ok';
     registerDetails.open = false;
+    loadUsage();
   } else {
     keyStatusEl.textContent = '';
     keyStatusEl.className = 'key-status';
+  }
+}
+
+const usageStatusEl = document.getElementById('usageStatus');
+
+// Reports SenSen's own tracked usage against its internal per-key caps
+// (see app/pages.py MAX_DEEP_SCAN_PER_KEY / MAX_OCR_API_PER_KEY) -- not
+// the vendor's live rate-limit state, which none of Gemini/OpenAI/xAI
+// expose via a simple "requests remaining" read endpoint.
+async function loadUsage() {
+  const apiKey = apiKeyEl.value;
+  if (!apiKey) { usageStatusEl.textContent = ''; return; }
+  try {
+    const res = await fetch('/api/v1/usage', { headers: { 'X-API-Key': apiKey } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    usageStatusEl.textContent = `Đã dùng — Deep scan: ${data.deep_scan_used}/${data.deep_scan_limit} · OCR API: ${data.ocr_api_used}/${data.ocr_api_limit}`;
+    usageStatusEl.className = 'key-status';
+  } catch (err) {
+    usageStatusEl.textContent = '';
   }
 }
 
@@ -326,6 +370,7 @@ const savedKey = localStorage.getItem('sensen_api_key');
 if (savedKey) setApiKey(savedKey, { persist: false });
 
 apiKeyEl.addEventListener('input', () => localStorage.setItem('sensen_api_key', apiKeyEl.value));
+apiKeyEl.addEventListener('change', loadUsage);
 
 document.getElementById('registerBtn').addEventListener('click', async () => {
   const email = document.getElementById('registerEmail').value.trim();
@@ -356,6 +401,8 @@ tabs.forEach(tab => tab.addEventListener('click', () => {
   inputMode = tab.dataset.mode;
   textModePanel.style.display = inputMode === 'text' ? 'block' : 'none';
   fileModePanel.style.display = inputMode === 'file' ? 'block' : 'none';
+  if (inputMode === 'text') redactRow.style.display = 'none';
+  else setSelectedFile(selectedFile);  // re-evaluate against the current file
 }));
 
 document.querySelectorAll('[data-sample]').forEach(btn => btn.addEventListener('click', () => {
@@ -366,6 +413,7 @@ document.querySelectorAll('[data-sample]').forEach(btn => btn.addEventListener('
 const fileDrop = document.getElementById('fileDrop');
 const fileInput = document.getElementById('fileInput');
 const fileDropLabel = document.getElementById('fileDropLabel');
+const redactRow = document.getElementById('redactRow');
 let selectedFile = null;
 
 fileDrop.addEventListener('click', () => fileInput.click());
@@ -382,6 +430,9 @@ function setSelectedFile(file) {
   } else {
     fileDrop.classList.remove('has-file');
   }
+  // Redaction (a real redacted file, not just masked text) supports
+  // .pdf/.docx/.txt -- see app/redact.py / POST /api/v1/redact/file.
+  redactRow.style.display = selectedFile && /\.(pdf|docx|txt)$/i.test(selectedFile.name) ? 'block' : 'none';
 }
 
 // -------------------------------------------------------- threshold ----
@@ -436,6 +487,60 @@ deepScanEl.addEventListener('change', () => {
   if (deepScanEl.checked) loadDeepScanModels();
 });
 
+// ---------------------------------------------------------- ocr model ----
+// Separate picker from deep scan's above -- OCR and deep scan can use
+// different models for the same request (see app/ocr_api.py's
+// ocr_image_via_api docstring), so this hits its own endpoint
+// (GET /api/v1/ocr/models?engine=...) rather than reusing deep scan's list.
+const ocrEngineEl = document.getElementById('ocrEngine');
+const ocrModelRow = document.getElementById('ocrModelRow');
+const ocrModelEl = document.getElementById('ocrModel');
+const ocrModelStatusEl = document.getElementById('ocrModelStatus');
+
+let ocrModelsLoadedFor = null;  // `${apiKey}:${engine}`, avoids refetching on every keystroke/toggle
+
+async function loadOcrModels(engine) {
+  const apiKey = apiKeyEl.value;
+  const cacheKey = `${apiKey}:${engine}`;
+  if (!apiKey || ocrModelsLoadedFor === cacheKey) return;
+  ocrModelStatusEl.textContent = 'Đang tải danh sách model...';
+  ocrModelStatusEl.className = 'key-status';
+  try {
+    const res = await fetch(`/api/v1/ocr/models?engine=${encodeURIComponent(engine)}`, {
+      headers: { 'X-API-Key': apiKey }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    while (ocrModelEl.options.length > 1) ocrModelEl.remove(1);
+    for (const m of data.models) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m === data.default_model ? `${m} (mặc định)` : m;
+      ocrModelEl.appendChild(opt);
+    }
+    ocrModelsLoadedFor = cacheKey;
+    if (data.status === 'skipped_no_key') {
+      ocrModelStatusEl.textContent = `Server chưa cấu hình key cho engine "${engine}" — xem README.`;
+    } else if (data.status === 'skipped_error') {
+      ocrModelStatusEl.textContent = 'Không lấy được danh sách model — vẫn có thể dùng server default.';
+    } else {
+      ocrModelStatusEl.textContent = `${data.models.length} model khả dụng · mặc định: ${data.default_model}`;
+      ocrModelStatusEl.className = 'key-status ok';
+    }
+  } catch (err) {
+    ocrModelStatusEl.textContent = 'Lỗi tải danh sách model: ' + err.message;
+    ocrModelStatusEl.className = 'key-status err';
+  }
+}
+
+ocrEngineEl.addEventListener('change', () => {
+  const engine = ocrEngineEl.value;
+  const isCloud = engine !== 'local';
+  ocrModelRow.style.display = isCloud ? 'block' : 'none';
+  ocrModelEl.value = '';  // switching engine invalidates any previously picked model id
+  if (isCloud) loadOcrModels(engine);
+});
+
 // -------------------------------------------------------- rendering ----
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -488,7 +593,12 @@ function renderStats(data, ms) {
     { label: 'Thời gian', value: `${ms}ms` },
     { label: 'Thực thể', value: data.detected_entities.length },
   ];
-  if (meta.file_type !== 'text') stats.push({ label: 'Xử lý', value: meta.processing_mode === 'ocr' ? 'OCR' : 'Trực tiếp' });
+  if (meta.file_type !== 'text') {
+    const mode = meta.processing_mode.startsWith('ocr_')
+      ? `OCR (${meta.processing_mode.slice(4)})`
+      : 'Trực tiếp';
+    stats.push({ label: 'Xử lý', value: mode });
+  }
   if (data.deep_scan_status) stats.push({ label: 'Deep scan', value: data.deep_scan_status });
   return `<div class="stat-bar">${stats.map(s => `<div class="stat">${s.label}<b>${s.value}</b></div>`).join('')}</div>`;
 }
@@ -538,6 +648,8 @@ scanBtn.addEventListener('click', async () => {
       form.append('anonymize', anonymize);
       form.append('deep_scan', deepScan);
       form.append('confidence_threshold', threshold);
+      form.append('ocr_engine', document.getElementById('ocrEngine').value);
+      if (ocrModelEl.value) form.append('ocr_model', ocrModelEl.value);
       if (model) form.append('model', model);
       res = await fetch('/api/v1/scan/file', { method: 'POST', headers: { 'X-API-Key': apiKey }, body: form });
     }
@@ -547,6 +659,7 @@ scanBtn.addEventListener('click', async () => {
     const ms = Math.round(performance.now() - t0);
     statusEl.textContent = 'Xong.';
     statusEl.className = '';
+    loadUsage();  // always refresh, not just when this scan used a paid path -- keeps the display trustworthy even if an earlier "change" event was missed
 
     let html = renderStats(data, ms);
     if (text !== null) {
@@ -565,6 +678,64 @@ scanBtn.addEventListener('click', async () => {
     statusEl.className = 'error';
   } finally {
     scanBtn.disabled = false;
+  }
+});
+
+const redactBtn = document.getElementById('redactBtn');
+redactBtn.addEventListener('click', async () => {
+  const apiKey = apiKeyEl.value;
+  const deepScan = deepScanEl.checked;
+  const model = deepScanModelEl.value || undefined;
+  const threshold = parseFloat(thresholdEl.value);
+  statusEl.textContent = '';
+  statusEl.className = '';
+
+  if (!apiKey) {
+    statusEl.textContent = 'Cần nhập X-API-Key (hoặc đăng ký bên trên).';
+    statusEl.className = 'error';
+    return;
+  }
+  if (!selectedFile) {
+    statusEl.textContent = 'Chưa chọn file PDF để ẩn danh hoá.';
+    statusEl.className = 'error';
+    return;
+  }
+
+  redactBtn.disabled = true;
+  statusEl.innerHTML = '<span class="spinner"></span>Đang tạo PDF đã ẩn danh hoá (có thể mất một lúc với PDF scan)...';
+
+  try {
+    const form = new FormData();
+    form.append('file', selectedFile);
+    form.append('deep_scan', deepScan);
+    form.append('confidence_threshold', threshold);
+    form.append('ocr_engine', document.getElementById('ocrEngine').value);
+    if (ocrModelEl.value) form.append('ocr_model', ocrModelEl.value);
+    if (model) form.append('model', model);
+
+    const res = await fetch('/api/v1/redact/file', { method: 'POST', headers: { 'X-API-Key': apiKey }, body: form });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `redacted_${selectedFile.name}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = 'Xong — đã tải PDF đã ẩn danh hoá.';
+    statusEl.className = '';
+    loadUsage();
+  } catch (err) {
+    statusEl.textContent = 'Lỗi: ' + err.message;
+    statusEl.className = 'error';
+  } finally {
+    redactBtn.disabled = false;
   }
 });
 </script>
