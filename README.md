@@ -30,9 +30,9 @@ image. Scoped to local use, not deployed publicly.
 ## Why it's built this way
 
 Every non-obvious choice below traded off against a fixed set of criteria
-this project was optimized for (Azure student credit, a weak local machine,
-free APIs, time, risk, real-world usefulness, a presentable web page, and
-leaning on existing prior art wherever possible). Where a claim depends on
+this project was optimized for (a weak local machine, free APIs, time,
+risk, real-world usefulness, a presentable web page, and leaning on
+existing prior art wherever possible). Where a claim depends on
 something outside this repo (a cloud free-tier limit, a library's behavior),
 it's cited.
 
@@ -75,32 +75,6 @@ of these. That's specifically true for *regex* categories; non-pattern
 integrations (the LLM-based deep scan, the underthesea Vietnamese NER) are
 real Python modules by necessity, not a YAML block — see "Adding a new
 category" below for where the line is.
-
-### Why Azure Container Apps instead of App Service
-
-App Service was the first option considered. Verified against current
-[Azure pricing docs](https://azure.microsoft.com/en-us/pricing/details/app-service/)
-and [Container Apps pricing](https://azure.microsoft.com/en-us/pricing/details/container-apps/):
-
-| | Free (F1) App Service | Container Apps (Consumption) |
-|---|---|---|
-| Cost | Free, but... | **Always free** up to 180K vCPU-s + 360K GiB-s + 2M requests/mo — doesn't touch your $100 credit at low traffic |
-| CPU quota | 60 CPU-min/**day**, hard-stops with 403 until UTC midnight when exhausted | No daily wall, scales to zero when idle |
-| Cold start | No "Always On" on F1 → sleeps, cold-starts | Scale-to-zero is the *design*, same effect but no quota-exhaustion cliff |
-
-Container Apps is a strict upgrade for this workload and still gives you the
-"deployed on Azure" story for a client pitch. See `Dockerfile` — it's already
-container-ready for either target.
-
-### Why not Hugging Face Spaces
-
-The obvious "put a Presidio demo on HF Spaces" instinct (Microsoft's [own
-official demo](https://huggingface.co/spaces/presidio/presidio_demo) lives
-there) turned out to be a dead end for a *free* account: per [HF's own
-docs](https://huggingface.co/docs/hub/en/spaces-overview), Docker/Gradio
-Spaces now require a paid personal plan to create — only Static Spaces (no
-Python backend) are free. Azure Container Apps + Render.com (fallback) are
-the real free options; see `Deployment` below.
 
 ### Curated recognizer set, not the full default list
 
@@ -1090,10 +1064,10 @@ on-screen review, the other a file to save).
   composition directly.
 - **OCR defaults to local Tesseract, not a cloud service.** Scanned/image PDFs go
   through `pytesseract` + the system `tesseract-ocr`/`tesseract-ocr-vie`
-  packages (`app/extract.py`) instead of raising a 422 — chosen over Azure
-  AI Document Intelligence specifically because this project is scoped to
-  run locally, not deployed to the cloud, so a service needing a cloud key
-  and a network call is the wrong tool here. Capped at `MAX_OCR_PAGES = 20`
+  packages (`app/extract.py`) instead of raising a 422 — free and offline
+  by default; a cloud OCR opt-in (Gemini/OpenAI/Grok, `ocr_engine=...`)
+  exists for badly degraded scans, see "Cloud OCR API" below.
+  Capped at `MAX_OCR_PAGES = 20`
   pages (`app/extract.py`) — OCR is meaningfully more CPU-intensive than
   reading an existing text layer, so an unbounded scanned document isn't
   safe to accept on the project's target weak-hardware host; beyond that
@@ -1238,18 +1212,15 @@ on-screen review, the other a file to save).
 
 ## Roadmap (not built yet, sequenced by effort/value)
 
-1. **Render.com fallback deploy** if Azure setup friction blocks a demo
-   deadline — free tier confirmed live (512MB RAM/0.1 CPU, 750 hrs/mo, ~15min
-   inactivity sleep). Tighter on RAM than Container Apps but zero Azure setup.
-2. **LLM confidence validator** — a different use of the same `langextract`/
+1. **LLM confidence validator** — a different use of the same `langextract`/
    Gemini pipeline already built for deep scan: re-score *existing*
    regex-based hits that land in the ambiguous 0.4–0.7 confidence band,
    instead of discovering new entity types. Not built yet — the deep-scan
    integration (see above) covers the new-category use case first.
-3. **Real daily-rolling deep-scan quota** — the current `MAX_DEEP_SCAN_PER_KEY`
+2. **Real daily-rolling deep-scan quota** — the current `MAX_DEEP_SCAN_PER_KEY`
    cap in `app/pages.py` is a simple lifetime counter; a proper daily reset
    is worth building once actual usage patterns are observed.
-4. **Company-name span boundaries** — the one remaining ORG/LOC issue
+3. **Company-name span boundaries** — the one remaining ORG/LOC issue
    (see Known Limitations) is a span-boundary problem investigated and
    explicitly not solved with regex, since Vietnamese has no reliable
    "end of proper name" delimiter under this file's case-insensitive
@@ -1262,68 +1233,36 @@ on-screen review, the other a file to save).
 retry — see "Deep scan" section above; underthesea's day-name and
 administrative-prefix type confusion — see "Known limitations".)*
 
-## Deployment (Azure Container Apps)
+## Deployment
 
-The `Dockerfile` itself is verified, not theoretical — re-verified after
-every round of work in this README. `google-genai` was missing from
+The `Dockerfile` is verified, not theoretical — `docker build` → `docker
+run` → `/register` → `/api/v1/scan` → `/api/v1/usage` → `/api/v1/redact/file`
+(a `.txt` upload, real masked output) all pass against a fresh container
+built from the current codebase. `google-genai` was missing from
 `requirements.txt` as an explicit dependency (only installed transitively
 via `langextract`, despite `app/deep_scan.py`/`app/ocr_api.py` importing
-it directly) — added, then `docker build` → `docker run` → `/register` →
-`/api/v1/scan` → `/api/v1/usage` → `/api/v1/redact/file` (a `.txt` upload,
-real masked output) all passed against a fresh container built from the
-current codebase, including the redaction/rate-limiter/retry modules
-added after the OCR API work. The three cloud OCR providers are verified
-by mocked unit/HTTP tests (dispatch, error handling, rate-limit retry,
-quota) plus SDK-signature introspection against the actually-installed
-package versions. Gemini specifically is also verified live, against a
-real 9-page scanned document (a genuine Vietcombank bank-guarantee
-amendment letter with stamps and a signature, not a synthetic sample)
-with a real `LANGEXTRACT_API_KEY`: the OCR text came back fully correct,
-diacritics included, and this is also how the `gemini-flash-latest` 503 in
-the Known Limitations entry above was found and reproduced. OpenAI/Grok
-have no test key available in this environment to run the same live
-check, so those two still rely on the mocked-test + introspection
-verification only — worth a real check with your own key before depending
-on them. What's untested beyond that is only the Azure side — this
-environment has no `az` CLI session available to it,
-and deployment is the one thing in this whole project that's genuinely
-blocked on you, not on more building: it needs your interactive `az login`
-and your Azure credit, neither of which can happen from here. This project
-is currently scoped to local use, so this section is here for if/when that
-changes, not an active next step. Commands to run yourself from the repo
-root once logged in (`az login`):
+it directly) — added and re-verified. The three cloud OCR providers are
+verified by mocked unit/HTTP tests (dispatch, error handling, rate-limit
+retry, quota) plus SDK-signature introspection against the
+actually-installed package versions. Gemini specifically is also verified
+live, against a real 9-page scanned document (a genuine Vietcombank
+bank-guarantee amendment letter with stamps and a signature, not a
+synthetic sample) with a real `LANGEXTRACT_API_KEY`: the OCR text came
+back fully correct, diacritics included. OpenAI/Grok have no test key
+available in this environment to run the same live check, so those two
+still rely on the mocked-test + introspection verification only — worth a
+real check with your own key before depending on them.
 
-```bash
-az group create -n sensen-rg -l southeastasia
+This project is scoped to local use, not deployed publicly — the
+`Dockerfile` is ready for any Docker host if that changes, but picking and
+setting up one isn't part of the current scope.
 
-az containerapp up \
-  --name sensen-api \
-  --resource-group sensen-rg \
-  --location southeastasia \
-  --source . \
-  --target-port 8000 \
-  --ingress external
-```
-
-`az containerapp up` builds the `Dockerfile` in this repo remotely and gives
-you a public HTTPS URL. Swap `SENSEN_DATABASE_URL` for a real path if you
-want the SQLite file to persist across revisions (Container Apps' local disk
-is ephemeral by default — for the MVP demo this is fine since state is just
-`users`/`api_keys`, re-registering is cheap).
-
-Set `LANGEXTRACT_API_KEY` as a secret afterward if you want deep_scan (and
-`ocr_engine=gemini`, which reuses the same key) to actually work in
-production, not just report `skipped_no_key`. `OPENAI_API_KEY`/
-`XAI_API_KEY` are the same pattern if you also want `ocr_engine=openai`/
-`grok` — all three are optional, cloud OCR falls back to a clear 422 per
-engine if its key is missing, same as deep_scan does:
-
-```bash
-az containerapp secret set --name sensen-api --resource-group sensen-rg \
-  --secrets langextract-key=<your_key>
-az containerapp update --name sensen-api --resource-group sensen-rg \
-  --set-env-vars LANGEXTRACT_API_KEY=secretref:langextract-key
-```
+Set `LANGEXTRACT_API_KEY` as an env var (or secret, per your host) if you
+want deep_scan (and `ocr_engine=gemini`, which reuses the same key) to
+actually work, not just report `skipped_no_key`. `OPENAI_API_KEY`/
+`XAI_API_KEY` are the same pattern for `ocr_engine=openai`/`grok` — all
+three are optional, cloud OCR falls back to a clear 422 per engine if its
+key is missing, same as deep_scan does.
 
 ## Reference / prior art
 
@@ -1383,5 +1322,5 @@ scripts/assess_corpus.py   Batch-scan a folder, rank documents by risk (the Asse
 sample_corpus/         9 synthetic (fake-data) documents; full_coverage_demo.txt hits all 22
                       entity types (every custom category + all curated Presidio types +
                       VN NER + both deep-scan categories) in one file for manual testing
-Dockerfile             Ready for Azure Container Apps / Render / any Docker host
+Dockerfile             Ready for any Docker host
 ```
