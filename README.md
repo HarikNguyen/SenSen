@@ -182,26 +182,21 @@ classification):
 | H. GPS coordinates | `GPS_LOCATION` | Decimal lat/long pairs — deliberately weak base score (0.25), leans on context almost entirely, same design as `INTERNAL_TAX_CODE` |
 | I. Financial credential | `FINANCIAL_CREDENTIAL` | PIN/OTP/password *assignment* boosted by banking context — not the account number alone (same collision risk as phone-vs-tax-code, deliberately avoided) |
 
-Round 3 (added while fixing findings from scanning a real document — see
-"Known limitations" below for the full story):
+Round 3:
 
 | Category | entity_type | Signal |
 |---|---|---|
 | J. VN national ID | `VN_NATIONAL_ID` | Current 12-digit CCCD format (Thông tư 07/2016/TT-BCA): province code + century/gender digit constrained to `[0-3]` + birth year + random digits — a real structural rule, not a guess |
 
-Two more fixes from that same pass aren't new *categories* — they add VN
+Two more fixes from that same round aren't new *categories* — they add VN
 coverage to entity types Presidio already had: a dedicated Vietnam Phone
 Recognizer (mobile numbering plan: `0`/`+84` + prefix `[35789]` + 8 digits)
 now emits the standard `PHONE_NUMBER` alongside the built-in
 `PhoneRecognizer` (which only ships with US/GB/DE/FR/IL/IN/CA/BR by
 default), and `app/vi_ner.py` (underthesea) now emits `PERSON`/
-`ORGANIZATION`/`LOCATION` in place of the disabled `SpacyRecognizer` — see
-"Deep scan" section's sibling, right below "Known limitations".
+`ORGANIZATION`/`LOCATION` in place of the disabled `SpacyRecognizer`.
 
-Round 4 (found missing while diagnosing a real bank-guarantee letter's
-under-detection — same real document behind the vi_ner "Eighth round" fix
-in Known Limitations below; 2 new categories plus 2 pattern additions to
-existing ones, all verified directly against that document, not guessed):
+Round 4:
 
 | Category | entity_type | Signal |
 |---|---|---|
@@ -210,9 +205,7 @@ existing ones, all verified directly against that document, not guessed):
 
 `VN_NATIONAL_ID` also gained a second, weak pattern for the old 9-digit
 CMND format (Chứng minh nhân dân, phased out but still the number on file
-in real older documents — the original round-3 entry explicitly scoped
-this out as "current format only"; reversed once a real document showed
-why that mattered) — a bare 9-digit run has no internal structure to
+in real older documents) — a bare 9-digit run has no internal structure to
 constrain it the way CCCD's century/gender digit does, so it leans
 entirely on the existing `cmnd`/`cmtnd` context words, same design as
 every other weak pattern in this list. `CONTRACT_ID` gained a
@@ -299,50 +292,15 @@ omitted or `false` never touches this code path at all — zero behavior
 change for existing clients.
 
 **Retries up to 3 times on failure** (`_MAX_ATTEMPTS = 3` in
-`app/deep_scan.py`) before reporting `"skipped_error"` — two different
-failure modes, told apart per attempt. (1) A real, reproducible bug where
-`langextract`'s Gemini provider intermittently raises a schema-validation
-error on an otherwise-valid call (same text/model/key failed once, then
-succeeded on immediate retry — see Known Limitations for the full
-diagnosis): retried instantly, no wait needed. (2) A genuine Gemini RPM
-(requests-per-minute) rate limit, found live with a real free-tier key —
-surfaces as `langextract.core.exceptions.InferenceRuntimeError` wrapping a
-`google.genai.errors.APIError(429)` in `.original` (langextract's own
-Gemini provider already retries transient errors internally with a short
-backoff before raising this, so this is what's left after that already
-failed). An instant retry does nothing for a per-minute quota — no time
-has passed — so this case gets a real backoff sleep via `app/retry.py`'s
-`call_with_backoff` (the same shared helper `app/ocr_api.py`'s cloud OCR
-uses, see "Cloud OCR API" below), unwrapping `.original` first since the
-wrapper itself isn't one of the exception types `is_transient_error`
-recognizes. Either way, a bounded retry rather than an unbounded one, so a
-genuine outage still surfaces as `"skipped_error"` instead of retrying
-forever and burning quota.
-
-**A third failure mode, also found live, needed a different fix — a
-throttle-granularity bug, not a limiter bug.** The RPM 429 above kept
-happening even with the proactive `gemini_limiter.acquire()` (see "Cloud
-OCR API" below) called before every `lx.extract()` attempt. Root cause:
-`lx.extract()` silently splits a long document into several chunks
-(`max_char_buffer`, 1000 chars by default) and fires up to `max_workers`
-(10 by default) of them at Gemini **concurrently** in its own internal
-thread pool — confirmed directly by running a real 7200-char `lx.extract()`
-call through a stubbed client and counting: it made 9 separate chunk
-requests, not 1. A single `acquire()` before the outer `lx.extract()` call
-only throttled that outer call, never the real per-chunk HTTP requests
-happening underneath it — so one deep_scan request on a moderately long
-document could burst straight past the free-tier RPM quota untouched by
-our own throttle. Fixed by patching
-`GeminiLanguageModel._process_single_prompt` (the one place every actual
-chunk request funnels through, whether parallel or sequential, first
-attempt or langextract's own internal per-chunk retry) to call
-`gemini_limiter.acquire()` itself, once per real HTTP call — there's no
-public langextract API for "throttle every internal chunk request",
-so this reaches past its public surface the same way `app/redact.py`'s
-`part._blob` already does for DOCX images. Applied once at import time in
-`app/deep_scan.py` (the only module that imports `langextract`), so no
-other code path is affected; pinned by
-`test_deep_scan_throttles_every_langextract_chunk_not_just_the_outer_call`.
+`app/deep_scan.py`) before reporting `"skipped_error"` — an intermittent
+`langextract` schema-validation race retries instantly, a genuine Gemini
+RPM 429 gets a real backoff via `app/retry.py`'s `call_with_backoff` (the
+same helper `app/ocr_api.py`'s cloud OCR uses, see "Cloud OCR API"
+below). `gemini_limiter` (see below) throttles every real per-chunk
+`lx.extract()` HTTP call, not just the outer call — see
+`CONTRIBUTING.md` for why that distinction mattered. Either way, a bounded
+retry, so a genuine outage still surfaces as `"skipped_error"` instead of
+retrying forever and burning quota.
 
 **`model` is optional** and picks the Gemini model for that one call;
 omitted, it falls back to `DEFAULT_MODEL_ID` in `app/deep_scan.py`
@@ -371,13 +329,11 @@ few-shot examples — no other code changes needed, same story as
 | `IP_TRADE_SECRET_CONTENT` | Upgrades the regex-only `IP_SENSITIVE_MARKER` (which only matches the literal word "confidential") into real detection of trade-secret-shaped content — proprietary algorithms, formulas, unreleased specs |
 | `HR_SENSITIVE_CONTENT` | Performance-review / disciplinary content — no regex-detectable shape at all |
 
-**Full-coverage expansion (2026-08-21).** Originally deep scan only
-produced the two content-flag types above plus `ORGANIZATION`, deliberately
-narrow — the point was to avoid burning Gemini free-tier quota on
-categories regex/NER already handle cheaply and well. Explicitly asked to
-widen it to *every* category the recognizer registry produces instead, cost
-accepted as a known tradeoff (`deep_scan` stays opt-in and quota-capped
-either way). `PROMPT_DESCRIPTION`/`EXAMPLES` now also cover:
+**Full coverage.** `PROMPT_DESCRIPTION`/`EXAMPLES` also cover every other
+recognizer-registry category, as a verification pass — deliberately
+redundant with regex/NER for exact-shape categories (email, credit card,
+...), genuinely useful for the free-text ones NER struggles with (PERSON,
+LOCATION, FULL_ADDRESS):
 
 | Group | entity_type values |
 |---|---|
@@ -385,23 +341,15 @@ either way). `PROMPT_DESCRIPTION`/`EXAMPLES` now also cover:
 | Standard PII (built-in Presidio, kept in `recognizers.yaml`) | `EMAIL_ADDRESS`, `PHONE_NUMBER`, `URL`, `IP_ADDRESS`, `CREDIT_CARD`, `IBAN_CODE`, `CRYPTO`, `MAC_ADDRESS`, `US_SSN` |
 | VN / enterprise custom categories | `CONTRACT_ID`, `INTERNAL_TAX_CODE`, `FINANCIAL_METRIC`, `EMPLOYEE_ID`, `INFRA_SECRET`, `IP_SENSITIVE_MARKER`, `CRYPTO_PRIVATE_KEY`, `INFRA_NETWORK_MAP`, `GPS_LOCATION`, `FINANCIAL_CREDENTIAL`, `VN_NATIONAL_ID`, `BANK_ACCOUNT_NUMBER`, `FULL_ADDRESS` |
 
-27 classes in total across 14 `ExampleData` entries (33 individual
-extractions) — grouped into realistic multi-entity snippets rather than one
-isolated example per class, closer to how these actually co-occur in a real
-document. **Verified live against the real Gemini API** (not just the
-offline grounding check below): a synthetic VN identity/contract paragraph
-correctly produced all 8 of its expected types (`PERSON`, `VN_NATIONAL_ID`,
-`FULL_ADDRESS`, `PHONE_NUMBER`, `EMAIL_ADDRESS`, `BANK_ACCOUNT_NUMBER`,
-`ORGANIZATION`, `CONTRACT_ID`) with correct spans, no entity duplicated
-alongside its regex/NER equivalent. Two offline tests pin the data itself:
-`test_deep_scan_examples_are_grounded_and_cover_every_expected_class`
-(every `extraction_text` must be a verbatim substring of its example's
-`text` — langextract silently drops an extraction that isn't, so a typo in
-a hand-written example would otherwise fail only against the live API, not
-in an offline test) and
-`test_deep_scan_overlap_types_matches_examples_coverage` (keeps
-`app/scanning.py`'s `_DEEP_SCAN_OVERLAP_TYPES` in sync with what `EXAMPLES`
-can actually produce).
+27 classes across 14 `ExampleData` entries, grouped into realistic
+multi-entity snippets rather than one isolated example per class.
+Verified live against the real Gemini API on a synthetic VN
+identity/contract paragraph: all 8 of its expected types came back with
+correct spans, none duplicated alongside its regex/NER equivalent.
+`test_deep_scan_examples_are_grounded_and_cover_every_expected_class` and
+`test_deep_scan_overlap_types_matches_examples_coverage` in
+`tests/test_api.py` pin the example data and its sync with
+`app/scanning.py`'s `_DEEP_SCAN_OVERLAP_TYPES`.
 
 Two things worth knowing:
 - **Scores are a fixed placeholder** (`0.6`) — langextract doesn't produce a
@@ -473,25 +421,13 @@ own docs — so both go through the `openai` SDK pointed at a different
 **Model ids are env-overridable**
 (`GEMINI_OCR_MODEL`/`OPENAI_OCR_MODEL`/`XAI_OCR_MODEL`, defaulting to
 `gemini-flash-lite-latest`/`gpt-5.6`/`grok-4.6`) because vision model
-names churn fast at every vendor — confirmed while building this feature:
-the defaults above already superseded several earlier model ids within
-2026 alone. A stale default just fails with a clear provider error (never
-a silently wrong answer), so override the env var if a default 404s
-rather than treating it as a bug in this codebase.
-
-The Gemini default specifically changed once already, from
-`gemini-flash-latest` to `gemini-flash-lite-latest` (matching
-`app/deep_scan.py`'s already-proven `DEFAULT_MODEL_ID`) — found live
-against a real user's real scanned document (a 9-page bank-guarantee
-letter, not a synthetic sample): `gemini-flash-latest` returned a genuine
-`503 UNAVAILABLE "This model is currently experiencing high demand"`
-specifically for image+text requests (a plain-text call to the same model
-worked fine at the same moment), which is what motivated the 5xx-retry
-work described next — but a sustained capacity issue on one model isn't
-something 3 retries reliably rides out. Switching the default to
-`gemini-flash-lite-latest` and re-running against the exact same file
-came back `200 OK` with fully correct OCR text (diacritics included) on
-the first attempt.
+names churn fast at every vendor. A stale default just fails with a clear
+provider error (never a silently wrong answer), so override the env var
+if a default 404s rather than treating it as a bug in this codebase.
+`gemini-flash-lite-latest` specifically (not the plain `gemini-flash-
+latest`) also avoids a real `503 "high demand"` overload that hits the
+plain variant more often on image+text requests specifically — see
+`CONTRIBUTING.md`.
 
 **Per-request model override, independent from deep_scan's:** `/api/v1/
 scan/file` also accepts `ocr_model` alongside `ocr_engine`, and
@@ -524,18 +460,14 @@ moment the configured RPM budget would otherwise be exceeded — one
 instance per provider (`gemini_limiter`, `openai_limiter`, `xai_limiter`),
 env-overridable (`GEMINI_RPM_LIMIT`, `OPENAI_RPM_LIMIT`, `XAI_RPM_LIMIT`;
 default 10/60/60 — the Gemini default is deliberately conservative,
-comfortably under the 15 RPM this project's own free-tier key was actually
-observed hitting). Critically, **`gemini_limiter` is one shared instance
-between `app/ocr_api.py`'s Gemini engine and `app/deep_scan.py`** — the two
-features draw down the same real quota on the same key (both default to
+comfortably under the observed real free-tier RPM). Critically,
+**`gemini_limiter` is one shared instance between `app/ocr_api.py`'s
+Gemini engine and `app/deep_scan.py`** — the two features draw down the
+same real quota on the same key (both default to
 `gemini-flash-lite-latest`), so throttling them independently would let
 each think it had the full budget and still blow through the real limit
-combined, which is exactly what happened during this project's own live
-testing before this fix. This replaces the old flat
-`OCR_API_PAGE_DELAY_SECONDS = 2.0` sleep between OCR pages — that paced
-blindly regardless of actual load; the limiter only waits when the budget
-is genuinely tight, so a document under budget OCRs at full speed instead
-of always eating a fixed delay.
+combined. This replaces waiting on a fixed per-page delay regardless of
+actual load — the limiter only waits when the budget is genuinely tight.
 
 Deliberately **minute-scale only, not day-scale**: blocking a few seconds
 for an RPM slot is reasonable inside one HTTP request; blocking for
@@ -549,9 +481,7 @@ wait — the right response shape at that timescale.
 `app/deep_scan.py`, pulled out into its own module for the same
 "one implementation, not two that could drift" reason as the limiter
 above) retries a transient status (429 rate-limit, or 500/502/503/504 —
-the provider's own infra temporarily overloaded, e.g. Gemini's real "This
-model is currently experiencing high demand... try again later" 503, hit
-and fixed during this feature's first real use) up to 3 attempts total
+the provider's own infra temporarily overloaded) up to 3 attempts total
 with backoff (3s, then 10s) before giving up — checked via `openai.
 APIStatusError.status_code` (covers `RateLimitError`, `InternalServerError`,
 etc. in one check) for OpenAI/Grok, `google.genai.errors.APIError.code`
@@ -667,51 +597,17 @@ whose whole point is not leaking PII.
   boxes turn out unreliable in practice is the fallback below, not the
   parser.
 
-**Real Gemini JSON-reliability quirks found live, not hypothetical —
-asking for JSON via a plain-text prompt turned out not to be robust
-enough, so this was fixed at the root rather than by patching around each
-new failure shape:**
-- First found: `json.loads` in strict mode (the default) rejects a raw,
-  un-escaped control character inside a string value — Gemini's `"text"`
-  value routinely contains a literal newline where the JSON spec requires
-  `\n`, which failed the entire page's redaction with `Invalid control
-  character at: line N column M` over what's really a cosmetic quoting
-  slip, not a structurally broken response.
-- Then found on the same image, repeated identical calls: Gemini doesn't
-  reliably use the exact key names the prompt asks for either — **the
-  model substituting `"label"` for `"text"`** (inconsistently even within
-  one call's item array) and/or **`"box"` for `"box_2d"`** (consistent
-  within one call, but flips call to call), both silently producing 0
-  usable words on an otherwise perfectly readable image (an unrecognized
-  key just gets skipped).
-- Then a third shape surfaced live on a real user document: `Expecting ','
-  delimiter: line N column M` — a different malformation (most likely an
-  unescaped quote inside a "text" value), same underlying cause. At this
-  point patching `_parse_bbox_json`/`_items_to_words` for each newly
-  discovered malformation stopped being the right call — free-text
-  generation asked to "look like JSON" via a prompt has an effectively
-  unbounded set of ways to drift, and finding them one at a time via
-  production traffic isn't a real fix.
-
-**Root-cause fix: Gemini's structured-output feature
-(`response_schema`), not more prompt engineering.** `_ocr_words_gemini`
-now passes `response_schema=list[_GeminiBboxItem]` (a small Pydantic
-model, `{text: str, box_2d: list[float]}`) alongside
-`response_mime_type="application/json"`. This isn't a stronger-worded
-prompt — it constrains the model's actual token-level decoding to the
-declared shape, so a field can't be renamed (`"label"` becomes
-structurally impossible, not just discouraged) and string values come out
-correctly escaped by construction, not free text that merely resembles
-JSON. Confirmed live: called the real API repeatedly with this schema on
-the same probe image — every successful response used exactly `["text",
-"box_2d"]`, no drift across repeated calls (three earlier consecutive
-calls *without* the schema had all three drifted). `_parse_bbox_json`'s
-`strict=False` and `_items_to_words`' text/label + box_2d/box/bbox
-fallbacks are kept regardless, as defense in depth and because OpenAI/Grok
-still go through `_ocr_words_responses_api`'s prompt-only JSON, not this
-mechanism — a natural follow-up if the same drift shows up there. Pinned
-offline by `test_parse_bbox_json_tolerates_raw_control_character_in_string`
-and `test_items_to_words_tolerates_gemini_key_drift`.
+**Gemini's response is schema-constrained, not just prompted.**
+`_ocr_words_gemini` passes `response_schema=list[_GeminiBboxItem]` (a
+Pydantic model, `{text: str, box_2d: list[float]}`) alongside
+`response_mime_type="application/json"` — this constrains the model's
+actual token-level decoding to the declared shape, so field names can't
+drift and string values come out correctly escaped, unlike free text that
+merely resembles JSON (see `CONTRIBUTING.md` for the failure modes this
+replaced). `_parse_bbox_json`'s `strict=False` and `_items_to_words`'
+text/label + box_2d/box/bbox fallbacks are kept as defense in depth, and
+because OpenAI/Grok still go through prompt-only JSON, not this schema
+mechanism.
 
 **Safety fallback — the single most important property of this feature**:
 if a detected entity's text can't be confidently located on the page
@@ -725,16 +621,12 @@ regex match is elsewhere in this project; pinned directly by
 `test_redact_cloud_engine_no_boxes_returned_gives_clear_422` in
 `tests/test_api.py`.
 
-**A real bug found building this, not hypothetical**: the first working
-version's `doc.tobytes()` call (no arguments) produced an **11MB+ file for
-a single tiny test page** that should have been ~25KB — a redacted
-scanned page's freshly-embedded image came out uncompressed, and the
-deleted original page's data wasn't garbage-collected. Fixed by calling
-`doc.tobytes(garbage=4, deflate=True, clean=True)` instead — confirmed via
-`test_redact_output_is_reasonably_sized_not_bloated`, and by measuring the
-actual before/after byte counts directly while diagnosing it. A no-op
-cost for digital-text pages (they never embed a new image), just
-consistently applied.
+Output is written via `doc.tobytes(garbage=4, deflate=True, clean=True)`,
+not a plain `doc.tobytes()` — the plain form leaves a redacted scanned
+page's embedded image uncompressed and the deleted original page's data
+uncollected (see `CONTRIBUTING.md` for the 11MB-file bug this fixed).
+Pinned by `test_redact_output_is_reasonably_sized_not_bloated`. A no-op
+cost for digital-text pages, which never embed a new image.
 
 ### DOCX — run-splicing for text, the same OCR-and-blackout pipeline for embedded images
 
@@ -802,413 +694,45 @@ on-screen review, the other a file to save).
 
 ## Known limitations (read before demoing)
 
-- **Vietnamese NER has known residual imprecision (not perfect, but no
-  longer garbage).** `en_core_web_sm`'s `SpacyRecognizer` is disabled
-  (`enabled: false` in `recognizers.yaml`) — on a real scanned contract it
-  tagged ordinary phrase fragments ("một bên", "Ông/Bà") as PERSON/ORG and
-  misclassified a real phone number and national ID as DATE_TIME, 0%
-  precision in that test. `app/vi_ner.py` (underthesea) replaces it for
-  PERSON/ORGANIZATION/LOCATION — ~109MB RAM (comparable to en_core_web_sm),
-  no network call. First pass had its own noise problem, found by running it
-  over the whole `sample_corpus/` (not just a clean sentence): underthesea's
-  model reads ALL-CAPS headers, secret/key blobs and financial figures as
-  strong entity signals, so section titles and RSA key markers came back
-  tagged PERSON/LOCATION. Fixed with a Title Case + no-digits filter
-  (`_looks_like_named_entity` in `app/vi_ner.py`) — real Vietnamese names and
-  place names are always Title Case, headers/secrets/figures aren't; this
-  dropped corpus-wide detections from 80 to 39 entities with the false
-  positives gone and the real names/places intact.
+*Engineering history — what bugs were found and how they were fixed during
+development — moved to `CONTRIBUTING.md` to keep this section focused on
+what's actually still true today.*
 
-  Third round, found by re-running the exact real contract PDF that started
-  this fix: some PDFs drop the space glyph between certain word pairs at the
-  font/kerning level (confirmed via raw `pymupdf` word-box inspection — the
-  space is genuinely absent from the source file, not an extraction bug),
-  and a fused run like "Trợlý" or "Chếđộlàm" was opaque to underthesea's own
-  tokenizer, so it got swallowed as one token and tagged on capitalization
-  alone. `_expand_fused_words()` in `app/vi_ner.py` repairs this before
-  tagging: it DP-segments any non-dictionary token into known Vietnamese
-  syllables (frequencies reused from underthesea's own bundled
-  `Viet74K.txt`, no second dictionary shipped), only rewriting a token when
-  the DP finds *full* coverage — secrets, IDs and real foreign words are
-  left untouched since no full syllable coverage exists for them. Verified
-  against the same real PDF: recovers a full party name ("Trịnh SỹThành")
-  that was previously invisible entirely, and correctly bounds real
-  compound place names ("Phường Thủ Thiêm").
-
-  Fourth round: the Title Case filter above was a hard keep/reject gate,
-  and every kept result got a flat `0.6` — which meant this recognizer,
-  alone among every other one in this codebase, ignored the caller's
-  `confidence_threshold` entirely. Tried fixing the remaining single-word
-  noise ("Được", "Xét", "Cục") with the syllable-frequency table already
-  built for word-fusion repair — checking raw frequency doesn't work
-  (verified: "cục"=61 sits right next to real name syllables like
-  "thủ"=143), so that alone isn't a usable signal. Replaced the hard gate
-  with `_score_entity()`: a graduated score built from *dictionary
-  membership* (not frequency) plus two more signals — multi-word spans get
-  a bonus (a real full name or place is almost always 2+ words) and
-  sentence/bullet-initial single words get a penalty. Verified this
-  actually separates cleanly on the real documents that surfaced the
-  problem: every real name/place lands at `0.65`, every false positive at
-  `0.15`–`0.25` — and unlike the flat score, this respects
-  `confidence_threshold` like every other category, so a caller asking for
-  a normal operating threshold (`0.5`+) sees none of the noise, without a
-  hard-coded denylist. Bonus catch: this also cleared the round-2 "Backup"
-  gap (a single capitalized non-Vietnamese word) at `0.5`+, since it has
-  no multi-word bonus and no dictionary-membership penalty to offset its
-  sentence-initial one.
-
-  Fifth round: two of the three remaining type-confusion cases turned out
-  to be fixable after all, once re-examined with the same "add a signal"
-  approach that fixed the single-word noise above rather than accepted as
-  permanent. `app/vi_ner.py` now applies a small, fully-enumerable
-  gazetteer correction after BIO merge: Vietnamese day names (`Thứ
-  Hai`...`Chủ Nhật`, a closed set of exactly 7) are rejected outright — a
-  day name is never itself PII — fixing the "Chủ Nhật"/"Thứ Bảy" as
-  LOCATION case from real documents; and administrative-unit prefixes
-  (`Phường`, `Quận`, `Huyện`, `Tỉnh`, `Xã`, `Thị trấn`, `Thành phố`) as a
-  span's first word force-correct the type to LOCATION without touching the
-  span boundary, fixing "Phường Thủ Thiêm" tagged PERSON. Verified against
-  every real document gathered across this whole NER fix (`hopdong.pdf`,
-  `sample_corpus/full_coverage_demo.txt`, the rest of `sample_corpus/`):
-  both false positives gone, every previously-correct entity unchanged.
-
-  One type-confusion case investigated at length on the regex/NER side and
-  ultimately solved a different way: a company name truncated to its last
-  1-2 words ("Toàn Cầu" from "Công ty Cổ phần Đầu Tư Toàn Cầu") tagged
-  LOCATION instead of ORGANIZATION — a span-boundary problem, not a type
-  problem, so the gazetteer approach above doesn't apply. Tried anchoring
-  on Vietnamese legal-entity prefixes ("Công ty TNHH/Cổ phần/...") via
-  regex twice: first case-insensitively (matching `recognizers.yaml`'s
-  global `IGNORECASE` flag), both unbounded and capped at 4 words — 4 of 5
-  real test sentences over-matched into unrelated trailing text ("Công ty
-  TNHH Thiên Tứ Điện thoại", "...và bà", "...làm việc"), and underthesea
-  itself often detects *no* organization span at all for these names in
-  isolation, leaving nothing to type-correct either. Second attempt:
-  registered a dedicated `PatternRecognizer` in Python (not YAML) with its
-  own `global_regex_flags` *without* `IGNORECASE` — Presidio's YAML schema
-  only exposes one global flag for the whole file, but a programmatically-
-  registered recognizer can set its own, letting real capitalization act
-  as the "end of name" signal this problem needed. That got 4 of 5 cases
-  exactly right (including recovering the *full* "Công ty Cổ phần Đầu Tư
-  Toàn Cầu" — better than underthesea managed on its own) and reduced the
-  5th case's error from swallowing a whole trailing clause down to one
-  extra word, since the immediately-following label ("Điện thoại:") is
-  also capitalized in Vietnamese and there's no delimiter between them.
-  Given that residual and the effort already spent, the actual fix shipped
-  is different: extended deep scan (opt-in, see below) with a third
-  extraction class, `ORGANIZATION` — an LLM doesn't have a "no reliable
-  delimiter" problem here, it can use real semantic understanding of what
-  a company name is. Verified against the same 5 real test sentences via
-  the live Gemini API: 5 of 5 exactly right, including the one case the
-  case-sensitive regex still got wrong. This only fixes it when a caller
-  opts into `deep_scan=true`; the free/default regex+NER path keeps its
-  documented limitation, since fixing this on that path specifically was
-  the part that turned out not to have a safe answer.
-
-  First version of this shipped with both results visible when
-  `deep_scan=true`: the correct full `ORGANIZATION` from deep scan *and*
-  the free path's wrong/truncated `LOCATION` for the same real company,
-  side by side — redundant, not wrong, but pointed out as worth cleaning
-  up. `_drop_regex_ner_entities_overlapped_by_deep_scan()` in
-  `app/scanning.py` now drops the free-path entity when deep scan finds an
-  overlapping `ORGANIZATION`/`PERSON`/`LOCATION` result — span *overlap*,
-  not the exact-span dedup used elsewhere in this file
-  (`_drop_lower_scored_exact_duplicates`), since the two spans genuinely
-  differ in width (underthesea's is a truncated substring of deep scan's
-  fuller one), not just in score. Deliberately scoped to just those three
-  types: `HR_SENSITIVE_CONTENT`/`IP_TRADE_SECRET_CONTENT` flag a whole
-  sentence and routinely overlap a `PHONE_NUMBER` or similar mentioned
-  inside it — a genuinely separate finding, not a competing interpretation
-  of the same value — so those two categories never trigger this drop,
-  verified with a test where a `PHONE_NUMBER` nested inside an
-  `HR_SENSITIVE_CONTENT` span survives untouched.
-
-  Sixth round, found by testing a two-column-layout document (a realistic
-  "hard" scenario, requested explicitly instead of more synthetic
-  corruption tests) — this turned out to explain the `"Tên\nNguyễn Xuân
-  Hùng"` case from round three too, not just a new one. Root cause:
-  underthesea's own tokenizer doesn't treat `"\n"` as a boundary, so it
-  sometimes fuses a real name with the next line's label word into one
-  token (`"Trần Thị Hoa"` + the next line's `"Số"` from `"Số CCCD:"`, one
-  fused token). The fused token then failed the exact-substring lookup that
-  maps it back to character offsets — the source text has a newline where
-  the token has a plain space — silently dropping the *entire* entity with
-  no error, losing a real name completely rather than just mis-scoring it.
-  Fixed in two parts, both in `app/vi_ner.py`: `_find_token()` falls back
-  to whitespace-flexible matching when the exact substring isn't found, and
-  `_split_on_newlines()` then scores each newline-delimited piece of a
-  recovered span independently, so `"Trần Thị Hoa"` is judged on its own
-  merits instead of as part of a `"Trần Thị Hoa Số CCCD"` blob that fails
-  the Title Case check as a whole. Fixing this then *surfaced* a second,
-  older latent bug rather than introducing one: `_is_sentence_initial`
-  checked `text[:start].rstrip()[-1]`, which silently strips the newline
-  itself before checking it, so a bare line break with no punctuation
-  before it (the common case — most lines in these documents don't end in
-  a period) was never actually recognized as sentence-initial, only a
-  newline preceded by `.`/`-` was. Previously invisible because the first
-  bug above was dropping the affected spans entirely; once real spans
-  started reaching the scorer, single English label words placed right
-  after a bare newline (`"Internal API key:"`, `"Email liên hệ:"`) stopped
-  getting the sentence-initial penalty and started passing the default
-  0.5 threshold. Fixed by walking back over whitespace to find the actual
-  boundary instead of `.rstrip()`-ing it away first. Verified against every
-  real document gathered across this whole fix (`hopdong.pdf`,
-  `sample_corpus/full_coverage_demo.txt`, the rest of `sample_corpus/`):
-  real names recovered, no new noise introduced by either fix.
-
-  Seventh round, found against a real 9-page scanned bank-guarantee letter
-  (a live user's own document, run through the new cloud-OCR path above) —
-  a materially bigger bug than round six's, and the real explanation for a
-  "way too few entities detected" report on that document. `_align_and_merge`
-  maps underthesea's ordered token list back to character offsets by
-  searching for each token from a `cursor` that only ever moves forward —
-  correct in spirit (tokens really do appear in order), but the search
-  itself was **unbounded**: `text.find(word, cursor)` would happily match
-  anywhere in the rest of the document, not just nearby. "Kiên Giang" (the
-  province name, repeated many times in a real multi-paragraph document)
-  appeared once split across a newline (`"Kiên\nGiang"`), which the exact
-  match couldn't find at its true position — so the unbounded search kept
-  going and "succeeded" against a completely different, unrelated later
-  mention of "Kiên Giang" hundreds of characters away instead. That one
-  wrong jump permanently desynced every token search after it from the
-  real text position, for the rest of the page: common repeated words
-  ("và", "là", "Bên") either failed to match at all or matched even
-  further-wrong positions, and a real full name (`"Hoàng Văn Long"`) was
-  silently dropped entirely — not a scoring/threshold problem, an alignment
-  one. Confirmed by direct trace (not guessed): printing the cursor before
-  and after each of the ~400 tokens on that page showed one token jumping
-  1,043 → decoy match instead of the true ~903, then a 396-char jump on the
-  very next (extremely common) token, after which effectively no further
-  token in the page ever found its true position again. Fixed with
-  `_MAX_TOKEN_LOOKAHEAD = 100` in `app/vi_ner.py`: both the exact and
-  whitespace-flexible searches in `_find_token()` are now bounded to
-  `cursor + 100` chars. Real token-to-token gaps measured on this same
-  document are 0-2 chars (adjacent tokens, or a skipped punctuation token
-  in between), so 100 is generous for any legitimate gap while being far
-  too small to reach a same-word occurrence in an unrelated later
-  paragraph — a token that truly isn't nearby now just fails to match
-  (self-recovering, same low-cost outcome as any other skipped token)
-  instead of "succeeding" against the wrong part of the document. Verified
-  directly against the real document that surfaced this: entity count on
-  its first page went from 15 to 29 at `score_threshold=0.0`, and the
-  previously-invisible `"Hoàng Văn Long"` is now recovered (as `LOCATION`,
-  not yet `PERSON` — see the type-confusion note earlier in this section;
-  the span is now found, the type is a separate, smaller residual issue).
-  Regression test: `test_find_token_does_not_desync_on_a_distant_unrelated_
-  occurrence` in `tests/test_api.py` pins the exact mechanism (a token with
-  no match inside the bounded window, but a decoy well past it) directly,
-  independent of underthesea's specific model behavior.
-
-  Eighth round: even with the round-seven fix shipped, a live user's real
-  bank-guarantee PDF still lost a real full name (`"Nguyễn Thị Mĩnh"`,
-  next to her national-ID number) after being OCR'd via the cloud engine —
-  a materially different bug from round seven's, found by re-testing the
-  exact fixed code against a real 9-page, ~24,500-character document
-  rather than a short reconstruction (a hand-typed reconstruction of the
-  same paragraph scored the name correctly in isolation, which is what
-  first pointed at "something about the *real*, full-length OCR output is
-  different"). Root cause, confirmed by dumping and diffing underthesea's
-  own raw tagged output against the source text: a long dot-leader
-  blank-fill line (`"...................."`, extremely common in
-  Vietnamese official forms for a hand-written blank) made underthesea's
-  own tagger silently skip tokenizing an entire **~1,200-character**
-  stretch of real text immediately after it — the tagger's raw output
-  jumped straight from a token right before the dots to one ~1,200
-  characters later, with zero tokens for anything in between. Not an
-  `_align_and_merge`/`_find_token` bug at all; underthesea's own output
-  already had the gap before any of this module's alignment code ran, so
-  the round-seven fix (which only protects against a *wrong* match, not a
-  *legitimately absent* one) had no way to bridge it.
-
-  First attempt: teach `_find_token` to detect a "stuck" cursor (N
-  consecutive local-search failures) and escalate to a much wider rescue
-  window only then. This worked for the motivating case but turned out to
-  need an increasingly complicated pile of extra heuristics to stop the
-  *widened* search from landing on a wrong coincidental match instead —
-  confirmed directly: a bare short token (a lone `"."`, or `"Điều"`,
-  Vietnamese for "Article/Clause" and common enough to appear dozens of
-  times in one legal document) is essentially guaranteed to "find" *some*
-  occurrence within a several-thousand-character rescue window, and
-  picking the wrong one cascaded into more wrong picks, one after another,
-  all the way to the literal last character of the real document. Adding
-  a word-length + dictionary-frequency safety filter fixed the short-word
-  case but then a bare `"2016"` (a year, 4 digits, not a dictionary
-  syllable so it slipped past that filter) reproduced the exact same
-  cascade — at which point this approach was abandoned as fundamentally
-  fragile (see `app/vi_ner.py`'s `_find_token` docstring for the fuller
-  postmortem) rather than adding a fourth heuristic to patch the third.
-
-  Shipped fix instead: remove the confusing input *before* underthesea
-  ever sees it, rather than trying to make alignment code recover from
-  underthesea's already-corrupted output after the fact.
-  `_collapse_repeated_punctuation()` in `app/vi_ner.py` collapses any run
-  of 4+ repeated identical non-word, non-whitespace characters down to 3,
-  applied after `_expand_fused_words()` but before `underthesea_ner()`;
-  `_compose_mappings()` chains the two transformations' offset maps so a
-  span found in the doubly-transformed text still resolves back to real
-  offsets in the original document. Verified directly against the exact
-  document that surfaced this: same tagger, same real text, dot-runs
-  collapsed first — the whole "Điều 7/8/9" section tags normally,
-  previously-missing name included, with no rescue-window machinery
-  needed at all. End-to-end effect on that document's free-text-path
-  entity count: 36 → **73** (score_threshold=0.0), including "Nguyễn Thị
-  Mĩnh" and two other real people's names (`"Lê Ngọc Hương"`, `"Đặng Ngọc
-  Hải"`) that were silently missing the same way. Regression tests (unit-
-  level, since the actual underthesea misbehavior only reproduces on a
-  long real document, not a short synthetic one — confirmed by trying):
-  `test_collapse_repeated_punctuation_shrinks_long_runs`,
-  `test_collapse_repeated_punctuation_leaves_short_runs_alone`,
-  `test_collapse_repeated_punctuation_mapping_resolves_to_real_offsets`,
-  `test_compose_mappings_chains_two_transformations_with_dash_one_propagation`
-  in `tests/test_api.py` pin the collapsing mechanism and offset-mapping
-  composition directly.
-- **OCR defaults to local Tesseract, not a cloud service.** Scanned/image PDFs go
-  through `pytesseract` + the system `tesseract-ocr`/`tesseract-ocr-vie`
-  packages (`app/extract.py`) instead of raising a 422 — free and offline
-  by default; a cloud OCR opt-in (Gemini/OpenAI/Grok, `ocr_engine=...`)
-  exists for badly degraded scans, see "Cloud OCR API" below.
-  Capped at `MAX_OCR_PAGES = 20`
-  pages (`app/extract.py`) — OCR is meaningfully more CPU-intensive than
-  reading an existing text layer, so an unbounded scanned document isn't
-  safe to accept on the project's target weak-hardware host; beyond that
-  cap it's a clear 422, not a silent hang. Verified end-to-end inside a
-  built Docker image (this machine has no local `tesseract` binary or
-  passwordless `sudo` to install one, so Docker — which builds as root —
-  is how this got tested): a synthetic scanned PDF rendered with a
-  Vietnamese-capable font OCR'd back to exact diacritics-correct text, and
-  `VN_NATIONAL_ID`/`LOCATION` detected from it. First attempt at this test
-  used PyMuPDF's default font, which silently drops Vietnamese diacritic
-  glyphs — that was a test-methodology bug, not a Tesseract limitation,
-  caught by inspecting the rendered image directly before trusting the OCR
-  output. `document_metadata.processing_mode` reports `"ocr_local"` (or
-  `"ocr_gemini"`/`"ocr_openai"`/`"ocr_grok"`, see below) vs
-  `"direct_text_extraction"` so a caller can tell which path ran. **Only
-  works if `tesseract-ocr` + `tesseract-ocr-vie` are installed on the host**
-  — the Dockerfile installs them automatically; for local non-Docker
-  `uvicorn --reload` use, run
-  `sudo apt-get install -y tesseract-ocr tesseract-ocr-vie` once (this one
-  step needs your password, which isn't available in this environment to
-  do it for you) — without it, a scanned PDF gives a clear 422 naming the
-  missing binary rather than a silent failure. A pay-per-page cloud OCR
-  fallback (Gemini/OpenAI/Grok) is now available as an explicit opt-in via
-  `ocr_engine` for anyone who'd rather not install/tune a local pipeline —
-  see the "Cloud OCR API" section above; this bullet describes the
-  still-default local path.
-
-  A follow-up `/code-review high --fix` pass caught two real bugs in the
-  first version of this before they shipped further: (1) `_extract_pdf`
-  checked `text.strip()` over the whole joined document, so a PDF mixing
-  digital-text pages with a scanned page (e.g. a typed contract with a
-  scanned signature page) got treated as fully "has a text layer" and the
-  scanned page's content was silently dropped, no error, no OCR attempt —
-  fixed to check per page and OCR only the pages that need it. (2)
-  `_ocr_page` only caught `TesseractNotFoundError`; a present-but-broken
-  install (`tesseract-ocr` without `tesseract-ocr-vie`, a plausible partial
-  install given the two-package instruction above) raised
-  `pytesseract.TesseractError` instead, which propagated as an unhandled
-  500 instead of the documented 422 — added the missing except branch.
-  Both re-verified in the same Docker setup: a mixed digital+scanned test
-  PDF now returns both pages' content, and a real tesseract call still
-  works correctly after also swapping the OCR image-build path from a
-  PNG-encode-then-decode round-trip to `Image.frombytes` directly off the
-  pixmap (an efficiency fix from the same pass — verified it doesn't change
-  OCR output).
-
-  **A more realistic worst case than a corrupt file: a genuinely degraded
-  scan.** Pushed on to test something closer to a real bad document instead
-  of synthetic garbage bytes — built a test PDF simulating a photocopy/photo
-  of a contract (Gaussian blur + a 2.5° rotation + photocopy-style speckle
-  noise) and tested each factor isolated and combined. Blur and rotation
-  alone didn't hurt accuracy at all — still 6/6 real entities detected
-  correctly either way. Speckle noise alone was the actual culprit: it
-  alone dropped detection to 0/6 correct (the CCCD number got OCR'd with
-  spurious internal spaces breaking its 12-digit pattern, real names became
-  unrecoverable garbage, a phone number was invented from noise). Root
-  cause and fix: added a median filter to `_ocr_page` in `app/extract.py`
-  before handing the image to Tesseract — but the first attempt (a 3x3
-  kernel) barely helped once actually measured through the real `dpi=200`
-  render this function uses (an earlier check that looked promising had
-  used a lower, non-representative resolution by mistake — a reminder to
-  verify against the exact code path, not a shortcut that looks similar).
-  At 200 DPI each noise pixel from the source gets upsampled into a
-  multi-pixel blob, too big for a 3x3 kernel; a 5x5 kernel fully fixed the
-  noise-only case but still lost entities on the combined blur+rotate+noise
-  case; a 7x7 kernel recovers that too (6/6, matching the clean-scan
-  baseline), with no regression re-verified on an actually-clean scan at
-  each step. This specific accuracy check isn't part of the automated
-  `pytest` suite — it inherently needs real Tesseract output quality, which
-  only exists inside the Docker verification, not in this local dev
-  environment (no local `tesseract` binary, see above) or a mock.
-- **Digit-pattern ambiguity is inherent, not fully solved.** VN tax codes and
-  phone numbers are both 10 digits; the mobile-prefix exclusion handles the
-  common case, not all of it — an inherent precision tradeoff of
-  regex-based detection, mitigated rather than eliminated.
-- **Same-span duplicates across categories, fixed without narrowing phone
-  coverage.** Found via the full-coverage test doc: Presidio's built-in
-  multi-region `PhoneRecognizer` also matched a CIDR block, a VN national
-  ID and a VN tax code — each under some *other* country's phone-number
-  shape (`DE`/`IN`/`BR` specifically), always at a lower score than the
-  correct category. The direct fix — narrowing `supported_regions` — was
-  considered and explicitly rejected: this product needs phone detection to
-  work broadly, not just VN/US, so trading away region coverage to fix a
-  scoring artifact was the wrong tradeoff. Fixed instead at the application
-  layer: `_drop_lower_scored_exact_duplicates()` in `app/scanning.py` keeps
-  only the highest-scoring result when two categories match the *exact
-  same* `[start, end)` span — the text can't genuinely be two different
-  identifier types at once, so a lower-scoring duplicate on the identical
-  span is redundant noise, not a second real finding. All 8 phone regions
-  stay fully active; a real US/GB/etc. number is untouched, only the
-  redundant low-score duplicate disappears.
+- **Vietnamese NER has residual imprecision, not perfect.** `app/vi_ner.py`
+  (underthesea) handles PERSON/ORGANIZATION/LOCATION for Vietnamese
+  content. One known open gap: a company name truncated to its last 1-2
+  words is occasionally still mistyped as LOCATION on the free/default
+  path — the fix (an LLM-based `ORGANIZATION` extraction, 5/5 correct on
+  the cases that motivated this) only applies when `deep_scan=true` (see
+  "Deep scan" above); Vietnamese has no reliable regex "end of proper
+  name" delimiter to fix this on the free path itself.
+- **OCR** needs `tesseract-ocr` + `tesseract-ocr-vie` installed on the host
+  (the Dockerfile installs them automatically; locally run
+  `sudo apt-get install -y tesseract-ocr tesseract-ocr-vie`) — without it, a
+  scanned PDF gives a clear 422 naming the missing binary. Capped at
+  `MAX_OCR_PAGES = 20` pages (a clear 422 beyond that, not a silent hang).
+  Accuracy degrades under heavy photocopy-style speckle noise; a median
+  filter mitigates this but doesn't fully eliminate it. A pay-per-page
+  cloud OCR opt-in (`ocr_engine=gemini/openai/grok`) exists for scans local
+  Tesseract struggles with — see "Cloud OCR API" above.
+- **Digit-pattern ambiguity is inherent, not fully solved.** VN tax codes
+  and phone numbers are both 10 digits; the mobile-prefix exclusion
+  handles the common case, not all of it — an inherent precision tradeoff
+  of regex-based detection, mitigated rather than eliminated.
 - **`saas.db` is a local file**, fine for MVP/demo, not for concurrent
-  production writers — swap the `DATABASE_URL` env var (`SENSEN_DATABASE_URL`)
-  for Postgres when that matters.
-- **Adversarial file-upload testing found and fixed 2 real crash bugs.**
-  Explicit request to test worst-case/hostile inputs, not just happy-path
-  ones — a corrupted or empty `.pdf` and a corrupted `.docx` both crashed
-  with an unhandled 500 instead of the documented clear 422:
-  `pymupdf.open()` raises its own `FileDataError` (its `EmptyFileError`
-  subclass covers the 0-byte case too) for a malformed PDF, and
-  `python-docx`'s `Document()` doesn't guarantee one exception type for a
-  malformed `.docx` (confirmed empirically: `zipfile.BadZipFile` for a
-  non-zip file, a plain `KeyError` for a valid zip that isn't a real docx
-  package) — neither was caught before, both are now (`app/extract.py`).
-  Other worst-case scenarios tested and found already handled correctly,
-  no fix needed: a 21-page scanned PDF (over `MAX_OCR_PAGES`), text at and
-  above `MAX_TEXT_LENGTH`, a 25MB upload (rejected fast once decoded — see
-  below for the residual risk this doesn't cover), a missing filename, an
-  adversarially long unbroken "word" fed to the DP word-segmentation repair
-  (50,000 chars in ~1.5s, no blowup), and the `FINANCIAL_CREDENTIAL`
-  pattern's lazy quantifier against a crafted no-match input (bounded by
-  its own `{0,60}` cap, no catastrophic backtracking). Residual, not fixed:
-  `scan_file` reads the entire upload into memory before any size check
-  (`await file.read()` in `app/pages.py`) — a 25MB file is rejected in
-  under 0.3s once decoded, so this is low-severity at realistic sizes, but
-  an upload sized in the hundreds of MB to GB range would still consume
-  that much memory before `MAX_TEXT_LENGTH` ever gets a chance to reject
-  it. Not fixed here since it needs a genuine policy decision (a hard
-  upload-size cap, likely in FastAPI/uvicorn config or a streaming read
-  with an early bailout) rather than a one-line patch, and the project's
-  own scoping (local use, not exposed publicly) makes this lower priority
-  than the two crash bugs above.
-- **Deep scan used to fail intermittently — this was a real, reproduced
-  bug, not FUD, now mitigated with a retry.** Found by testing
-  `sample_corpus/full_coverage_demo.txt`: the exact same call (same text,
-  model, key) returned `skipped_error` once and `"ok"` with correct
-  extractions on an immediate retry. Root cause is inside `langextract`
-  1.6.0's Gemini provider — a pydantic `ValidationError` building its
-  `response_schema` ("Extra inputs are not permitted" on
-  `type`/`properties`/`required`), which looks like a schema-shape mismatch
-  against the installed `google-genai` 2.18.1. Both packages were already at
-  their latest release when this was found, so there was no version bump
-  available to fix it at the source. `run_deep_scan` now retries once before
-  reporting `"skipped_error"` (see the Deep Scan section above) — this
-  doesn't eliminate the bug, it papers over a transient one; a *persistent*
-  failure (bad key, real outage, genuinely broken schema every time) still
-  surfaces as `"skipped_error"` after both attempts, and should still be
-  read as "deep scan didn't run," not folded into "nothing sensitive here"
-  — checking the regex-side results is still necessary, which is why
-  `deep_scan_status` is a separate field instead of silently merged into
-  `detected_entities`.
+  production writers — swap the `DATABASE_URL` env var
+  (`SENSEN_DATABASE_URL`) for Postgres when that matters.
+- **Large uploads are read fully into memory before any size check**
+  (`await file.read()` in `app/pages.py`) — realistic sizes (tens of MB)
+  are rejected in well under a second once decoded, but an upload in the
+  hundreds-of-MB-to-GB range would consume that much memory before
+  `MAX_TEXT_LENGTH` gets a chance to reject it. Needs a genuine policy
+  decision (a hard upload-size cap or a streaming read), not built since
+  this project isn't exposed publicly.
+- **A persistent deep-scan failure still surfaces as `"skipped_error"`**,
+  not folded into "nothing sensitive here" — `deep_scan_status` is a
+  separate response field specifically so the regex-side results are
+  still trusted as regex results, not silently treated as a complete scan.
 
 ## Roadmap (not built yet, sequenced by effort/value)
 
@@ -1231,7 +755,7 @@ on-screen review, the other a file to save).
 
 *(Done, not roadmap anymore: OCR — see "Known limitations"; deep-scan
 retry — see "Deep scan" section above; underthesea's day-name and
-administrative-prefix type confusion — see "Known limitations".)*
+administrative-prefix type confusion — see `CONTRIBUTING.md`.)*
 
 ## Deployment
 
@@ -1323,4 +847,6 @@ sample_corpus/         9 synthetic (fake-data) documents; full_coverage_demo.txt
                       entity types (every custom category + all curated Presidio types +
                       VN NER + both deep-scan categories) in one file for manual testing
 Dockerfile             Ready for any Docker host
+CONTRIBUTING.md        Dev setup, code style, and the engineering history of
+                      bugs found and fixed during development
 ```
